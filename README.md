@@ -6,6 +6,19 @@
 
 它只在被请求时、或团队的书面规则允许时行动；只在人必须行动、或能使用结果时说话。
 
+## 分支总览
+
+本仓库用分支承载同一思想的三种形态，各分支的 README 只讲自己的事：
+
+| 分支 | 是什么 | 适合谁 |
+| --- | --- | --- |
+| [`main`](https://github.com/ZephyrBD/opencode-superagent/tree/main)（本分支） | 完整插件：GitHub Notifications + 飞书 Source、策略 gate + 模型研判、面板 | 想给整个 GitHub 仓库配常驻智能体的团队 |
+| [`lite`](https://github.com/ZephyrBD/opencode-superagent/tree/lite) | 极简插件：会话本身即唯一 Source，`/work` 开单，无外部依赖 | 想先在本地会话里体验核心思想的个人 |
+| [`prototype`](https://github.com/ZephyrBD/opencode-superagent/tree/prototype) | 过渡形态的存档：DSH 原型在根 + `plugin-opencode/` 子目录 | 考古：插件从原型剥离时的样子 |
+| [`vanilla`](https://github.com/ZephyrBD/opencode-superagent/tree/vanilla) | 原始 dsh-superagent 研究原型（DeepSeek Harness bundle） | 研究领域模型与架构文档 |
+
+完整插件与 lite 插件是同仓库的两种形态，靠 rebase 维持，不互相 merge；`prototype` 与 `vanilla` 是只读存档。
+
 ## 它做什么
 
 - **Source**（GitHub Notifications 轮询）把 Issue/PR 的评论变成 Trigger
