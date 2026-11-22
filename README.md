@@ -13,7 +13,7 @@
 | 分支 | 是什么 | 适合谁 |
 | --- | --- | --- |
 | [`main`](https://github.com/ZephyrBD/opencode-superagent/tree/main)（本分支） | 完整插件：GitHub Notifications + 飞书 Source、策略 gate + 模型研判、面板 | 想给整个 GitHub 仓库配常驻智能体的团队 |
-| [`lite`](https://github.com/ZephyrBD/opencode-superagent/tree/lite) | 极简插件：会话本身即唯一 Source，`/work` 开单，无外部依赖 | 想先在本地会话里体验核心思想的个人（对该 Agent 说「阅读本仓库的 SETUP.md，带我安装 opencode-superagent-lite」，需先切到 lite 分支） |
+| [`lite`](https://github.com/ZephyrBD/opencode-superagent/tree/lite) | 极简插件：会话本身即唯一 Source，`/work` 开单，无外部依赖 | 想先在本地会话里体验核心思想的个人（对该 Agent 说「克隆 https://github.com/ZephyrBD/opencode-superagent 并切换到 lite 分支，阅读其中的 SETUP.md，带我安装 opencode-superagent-lite」） |
 | [`prototype`](https://github.com/ZephyrBD/opencode-superagent/tree/prototype) | 过渡形态的存档：DSH 原型在根 + `plugin-opencode/` 子目录 | 考古：插件从原型剥离时的样子 |
 | [`vanilla`](https://github.com/ZephyrBD/opencode-superagent/tree/vanilla) | 原始 dsh-superagent 研究原型（DeepSeek Harness bundle） | 研究领域模型与架构文档 |
 
@@ -33,7 +33,7 @@
 对你的编码 Agent 说：
 
 ```text
-阅读本仓库的 SETUP.md，带我安装 opencode-superagent。
+克隆 https://github.com/ZephyrBD/opencode-superagent 并阅读其中的 SETUP.md，带我安装 opencode-superagent。
 ```
 
 也可以手动安装，见 [SETUP.md](SETUP.md)。
