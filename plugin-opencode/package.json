@@ -1,0 +1,22 @@
+{
+  "name": "opencode-superagent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A proactive coding agent plugin for OpenCode, adapted from dsh-superagent: Sources produce Triggers, Eval accepts authorized work as Tickets with Mandates, Executors run each Ticket in its own session and worktree.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "pnpm typecheck && pnpm test"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "latest",
+    "@types/node": "22.20.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}
