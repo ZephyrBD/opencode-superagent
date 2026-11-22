@@ -1,17 +1,10 @@
 # opencode-superagent-lite
 
-[`main` 分支](https://github.com/ZephyrBD/opencode-superagent)完整插件的 **lite 分支**：仓库根就是插件本体，但去掉了 GitHub 与飞书 Source，用 **OpenCode 本会话消息**作为唯一 Source，用最少的代码展示 super agent 的核心思想。
+同一领域模型的**极小实现**：去掉 GitHub 与飞书 Source，用 **OpenCode 本会话消息**作为唯一 Source，用最少的代码展示 super agent 的核心思想。仓库根就是插件本体，与 [完整插件（main 分支）](https://github.com/ZephyrBD/opencode-superagent/tree/main)的区别只在于 Source 与研判层——main 由 GitHub/飞书事件驱动、带模型研判与面板，lite 由你在会话里 `/work` 直接驱动。
 
 > 尽可能少占用人的注意力，尽可能多地给出价值——同一哲学，没有外部依赖。
 
-## 分支关系
-
-- `main` —— 完整插件（GitHub Notifications + 飞书 Source、面板、策略版本化）
-- `lite` —— 本分支：同一领域模型的最小子集，session 即 Source
-- `prototype` —— 过渡形态存档：DSH 原型在根 + `plugin-opencode/` 子目录
-- `vanilla` —— 原始 dsh-superagent 研究原型（DeepSeek Harness bundle），只读
-
-两个插件分支是同一仓库的两种形态，靠 rebase 维持，不互相 merge；存档分支只读。
+分支全貌见 [main 的 README](https://github.com/ZephyrBD/opencode-superagent#三种形态)。本 README 只讲 lite 自己。
 
 ## 保留了什么
 
@@ -32,10 +25,10 @@ GitHub/飞书 Source 与 Channel、模型研判层（inferred）、Outbox 回执
 对你的编码 Agent 说：
 
 ```text
-克隆 https://github.com/ZephyrBD/opencode-superagent 并切换到 lite 分支，阅读其中的 SETUP.md，带我安装 opencode-superagent-lite。
+按 https://github.com/ZephyrBD/opencode-superagent lite 分支的 SETUP.md，带我安装 opencode-superagent-lite。
 ```
 
-也可以手动安装：
+也可以手动安装，见本分支的 [SETUP.md](SETUP.md)。核心步骤：
 
 ```bash
 git clone https://github.com/ZephyrBD/opencode-superagent.git
@@ -48,6 +41,8 @@ pnpm install && pnpm check
 ```jsonc
 { "plugins": ["<clone 路径>"] }
 ```
+
+> 注意：同一个项目不要同时注册 main 和 lite 的 checkout——两者的工具名相同，会互相覆盖。
 
 ## 使用
 
@@ -66,4 +61,4 @@ pnpm install && pnpm check
 - **Report/报告** —— worker 的结构化汇报，是移动工单状态的唯一方式
 - **Subscription/订阅** —— 工单与来源线程的关系；线程上的后续消息经它扇出，无需再评估
 
-完整定义见 `main` 分支或 [dsh-superagent 原型文档](https://github.com/ZephyrBD/opencode-superagent/blob/prototype/docs/001-domain.md)。
+完整定义见 [dsh-superagent 原型文档 001-domain](https://github.com/ZephyrBD/opencode-superagent/blob/vanilla/docs/001-domain.md)。
