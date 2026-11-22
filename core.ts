@@ -181,14 +181,13 @@ export class LiteEngine {
     const tickets = await Promise.all(thread.ticketIds.map(id => this.kv.get<Ticket>(ticketKeyOf(id))!))
     const live = tickets.filter((t): t is Ticket => t !== undefined && t.status === 'open')
 
-    // A person's message on a thread with tickets reaches them without an eval.
-    if (live.length > 0) {
+    // A person's message on a thread with tickets reaches the most recent one without an eval.
+    const target = live.at(-1)
+    if (target) {
       thread.triggerIds.push(trigger.id)
       await this.kv.set(threadKeyOf(thread.key), thread)
-      for (const ticket of live) {
-        await this.kv.set(`disposition/${trigger.id}`, 'fannedOut')
-        this.notify({ type: 'fanout', ticketId: ticket.id, text: trigger.text })
-      }
+      await this.kv.set(`disposition/${trigger.id}`, 'fannedOut')
+      this.notify({ type: 'fanout', ticketId: target.id, text: trigger.text })
       return 'fannedOut'
     }
 

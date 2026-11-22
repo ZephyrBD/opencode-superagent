@@ -1,286 +1,205 @@
 import { describe, expect, it } from 'vitest'
-import { Engine } from '../core/engine.ts'
-import { MemoryKV } from '../core/kv.ts'
-import { policy as makePolicy } from './policy.spec.ts'
-import type { Assessor, ThreadState } from '../core/engine.ts'
-import type { Decision, Trigger } from '../core/model.ts'
+import { LiteEngine, type EngineEvent, type Ticket, type Trigger } from '../core.ts'
+import { LiteExecutor, type SessionPort } from '../executor.ts'
+import { memoryKV } from '../kv.ts'
 
-const fakeAssessor = (script: Array<(input: { batch: Trigger[]; thread: ThreadState }) => Decision>): Assessor & { calls: { batch: Trigger[]; thread: ThreadState }[] } => {
-  const calls: { batch: Trigger[]; thread: ThreadState }[] = []
-  let step = 0
-  return {
-    calls,
-    async assess(input) {
-      calls.push(input)
-      const next = script[step]
-      step += 1
-      if (!next) throw new Error('script exhausted')
-      return next(input)
+const makeTrigger = (overrides: Partial<Trigger> = {}): Trigger => ({
+  id: 'tr1',
+  source: 'session',
+  actorId: 'operator',
+  text: 'fix the flaky test',
+  threadKey: 'session:s1',
+  at: 1000,
+  ...overrides,
+})
+
+interface Harness {
+  kv: ReturnType<typeof memoryKV>
+  engine: LiteEngine
+  executor: LiteExecutor
+  events: EngineEvent[]
+  sessions: { created: string[]; prompted: Array<{ sessionID: string; text: string }>; interrupted: string[] }
+}
+
+const harness = (limit?: number): Harness => {
+  const kv = memoryKV()
+  const events: EngineEvent[] = []
+  let ticketSeq = 0
+  let mandateSeq = 0
+  let decisionSeq = 0
+  const engine = new LiteEngine({
+    kv,
+    clock: () => 1000,
+    newTicketId: () => `t${++ticketSeq}`,
+    newMandateId: () => `m${++mandateSeq}`,
+    newDecisionId: () => `d${++decisionSeq}`,
+    notify: event => events.push(event),
+  })
+  const sessions = {
+    created: [] as string[],
+    prompted: [] as Array<{ sessionID: string; text: string }>,
+    interrupted: [] as string[],
+  }
+  const sessionPort: SessionPort = {
+    create: async title => {
+      sessions.created.push(title)
+      return { sessionID: `s-${title}` }
+    },
+    prompt: async (sessionID, text) => {
+      sessions.prompted.push({ sessionID, text })
+    },
+    interrupt: async sessionID => {
+      sessions.interrupted.push(sessionID)
     },
   }
+  const executor = new LiteExecutor({ sessions: sessionPort, kv, limit })
+  return { kv, engine, executor, events, sessions }
 }
 
-const trigger = (over: Partial<Trigger> = {}): Trigger => ({
-  id: 'trg_1',
-  source: 'github',
-  actor: { id: 'zephyrbd', bot: false },
-  text: 'fix this',
-  url: 'u',
-  at: 1,
-  threadKey: 'github:a/b:1',
-  ...over,
-})
-
-const setup = (assessor: Assessor) => {
-  const kv = MemoryKV()
-  const events: unknown[] = []
-  const engine = new Engine({ kv, policy: makePolicy(), assessor, clock: () => 1, notify: e => events.push(e) })
-  return { engine, kv, events }
-}
-
-describe('engine intake', () => {
-  it('accepts a trigger and creates a ticket with a mandate', async () => {
-    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 'fix this' })])
-    const { engine } = setup(assessor)
-    const result = await engine.intake(trigger())
-    expect(result).toBe('evaluated')
+describe('LiteEngine', () => {
+  it('accepts an explicit message: mandate, ticket and decision are created atomically', async () => {
+    const { engine, kv, events } = harness()
+    const disposition = await engine.intake(makeTrigger())
+    expect(disposition).toBe('evaluated')
     const tickets = await engine.tickets()
     expect(tickets).toHaveLength(1)
-    expect(tickets[0]!.status).toBe('open')
-    expect(tickets[0]!.subscriptions).toContain('github:a/b:1')
-    expect(await engine.mandateOf(tickets[0]!.id)).toMatchObject({ policyVersion: 'p1', strength: 'explicit', scope: 'fix this' })
-    expect(assessor.calls[0]!.thread.triggers).toHaveLength(1)
+    const ticket = tickets[0]!
+    expect(ticket.status).toBe('open')
+    expect(ticket.subscriptions).toEqual(['session:s1'])
+    const mandate = await engine.mandateOf(ticket.id)
+    expect(mandate).toMatchObject({ strength: 'explicit', actorId: 'operator', scope: 'fix the flaky test', via: 'session' })
+    const decisions = await kv.scan('decision/')
+    expect(decisions).toHaveLength(1)
+    expect(events[0]).toMatchObject({ type: 'accept', ticket: { id: ticket.id } })
+    const thread = await engine.thread('session:s1')
+    expect(thread?.ticketIds).toEqual([ticket.id])
   })
 
-  it('is idempotent on a replayed trigger', async () => {
-    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
-    const { engine } = setup(assessor)
-    await engine.intake(trigger())
-    const result = await engine.intake(trigger())
-    expect(result).toBe('filtered')
-    expect((await engine.tickets())).toHaveLength(1)
-    expect(assessor.calls).toHaveLength(1)
-  })
-
-  it('records without evaluating while paused', async () => {
-    const assessor = fakeAssessor([])
-    const { engine } = setup(assessor)
-    engine.policy.paused = true
-    expect(await engine.intake(trigger())).toBe('recorded')
-    expect(assessor.calls).toHaveLength(0)
-    expect(await engine.tickets()).toHaveLength(0)
-  })
-
-  it('does not deliver to a live ticket while paused', async () => {
-    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
-    const { engine, events } = setup(assessor)
-    await engine.intake(trigger())
-    engine.policy.paused = true
-    const personMessage = trigger({ id: 'trg_2', text: 'one more thing' })
-    expect(await engine.intake(personMessage)).toBe('recorded')
-    expect(events.filter(e => (e as { type: string }).type === 'fanout')).toHaveLength(0)
-  })
-
-  it('fans later thread triggers out to the live ticket without a new eval', async () => {
-    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
-    const { engine, events } = setup(assessor)
-    await engine.intake(trigger())
-    const later = trigger({ id: 'trg_2', text: 'actually also check the types' })
-    expect(await engine.intake(later)).toBe('fannedOut')
-    expect(assessor.calls).toHaveLength(1)
-    expect(events).toContainEqual(expect.objectContaining({ type: 'fanout', ticketId: expect.any(String), trigger: later }))
-  })
-
-  it('ignores bot triggers once a ticket is live only for new evals, but fan-out skips bots too', async () => {
-    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
-    const { engine } = setup(assessor)
-    await engine.intake(trigger())
-    expect(await engine.intake(trigger({ id: 'trg_3', actor: { id: 'ci-bot', bot: true } }))).toBe('filtered')
-  })
-
-  it('hands a follow-up back to Eval when the assessor rules it out of scope', async () => {
-    const assessor = fakeAssessor([
-      () => ({ kind: 'accept', scope: 's' }),
-      () => ({ kind: 'accept', scope: 'different work' }),
-    ])
-    const scoped = assessor as typeof assessor & {
-      classifyFollowUp?: (input: { trigger: Trigger; thread: ThreadState }) => Promise<{ inScope: boolean }>
-    }
-    scoped.classifyFollowUp = async ({ trigger: t }) => ({ inScope: t.id === 'trg_1' })
-    const { engine, events } = setup(scoped)
-    await engine.intake(trigger())
-    const other = trigger({ id: 'trg_5', text: 'also migrate the database' })
-    expect(await engine.intake(other)).toBe('evaluated')
-    expect((await engine.tickets())).toHaveLength(2)
-    expect(events.filter(e => (e as { type: string }).type === 'fanout')).toHaveLength(0)
-  })
-
-  it('fans an in-scope follow-up out without an extra eval', async () => {
-    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
-    const scoped = assessor as typeof assessor & {
-      classifyFollowUp?: (input: { trigger: Trigger; thread: ThreadState }) => Promise<{ inScope: boolean }>
-    }
-    scoped.classifyFollowUp = async () => ({ inScope: true })
-    const { engine, events } = setup(assessor)
-    await engine.intake(trigger())
-    expect(await engine.intake(trigger({ id: 'trg_6', text: 'also update the docs' }))).toBe('fannedOut')
-    expect((await engine.tickets())).toHaveLength(1)
-    expect(events.filter(e => (e as { type: string }).type === 'fanout')).toHaveLength(1)
-  })
-
-  it('queues a trigger when the assessor fails and retries it later', async () => {
-    const assessor = fakeAssessor([
-      () => { throw new Error('model down') },
-      () => ({ kind: 'accept', scope: 's' }),
-    ])
-    const { engine } = setup(assessor)
-    expect(await engine.intake(trigger())).toBe('evaluated')
-    expect(await engine.tickets()).toHaveLength(0)
-    await engine.retryPending('github:a/b:1')
+  it('is idempotent: the same trigger never opens work twice', async () => {
+    const { engine } = harness()
+    const first = await engine.intake(makeTrigger())
+    const second = await engine.intake(makeTrigger())
+    expect(first).toBe('evaluated')
+    expect(second).toBe('filtered')
     expect(await engine.tickets()).toHaveLength(1)
   })
 
-  it('records an unavailable decision when the assessor gives no verdict, and retries later', async () => {
-    const assessor = fakeAssessor([() => ({ kind: 'unavailable' }), () => ({ kind: 'accept', scope: 's' })])
-    const { engine } = setup(assessor)
-    expect(await engine.intake(trigger())).toBe('evaluated')
-    expect(await engine.tickets()).toHaveLength(0)
-    const thread = await engine.thread('github:a/b:1')
-    expect(thread?.decisions.at(-1)?.kind).toBe('unavailable')
-    await engine.retryPending('github:a/b:1')
+  it('fans a follow-up on the thread out to the live ticket without an eval', async () => {
+    const { engine, events } = harness()
+    const accept = await engine.intake(makeTrigger())
+    expect(accept).toBe('evaluated')
+    const ticketId = (await engine.tickets())[0]!.id
+    const disposition = await engine.intake(makeTrigger({ id: 'tr2', text: 'also update the changelog' }))
+    expect(disposition).toBe('fannedOut')
+    expect(events.at(-1)).toMatchObject({ type: 'fanout', ticketId, text: 'also update the changelog' })
     expect(await engine.tickets()).toHaveLength(1)
-    expect(assessor.calls).toHaveLength(2)
+  })
+
+  it('with an ended and an open ticket on the thread, the message reaches the most recent live one', async () => {
+    const { engine, executor, events } = harness()
+    await engine.intake(makeTrigger())
+    const first = (await engine.tickets())[0]!
+    // A ready report ends the first ticket; a new explicit message opens a second one.
+    await executor.report(first.id, { kind: 'ready', text: 'done', at: 2000 })
+    await engine.intake(makeTrigger({ id: 'tr2', text: 'second task' }))
+    const second = (await engine.tickets())[1]!
+    const disposition = await engine.intake(makeTrigger({ id: 'tr3', text: 'a note for the latest work' }))
+    expect(disposition).toBe('fannedOut')
+    expect(await engine.tickets()).toHaveLength(2)
+    expect(events.at(-1)).toMatchObject({ type: 'fanout', ticketId: second.id })
+    // The ended ticket stays ended: the note reached the live one instead.
+    expect(first.status).toBe('ended')
+    expect(second.status).toBe('open')
+  })
+
+  it('a person message on the thread resumes an ended ticket under the same mandate', async () => {
+    const { engine, executor, kv, events } = harness()
+    await engine.intake(makeTrigger())
+    const ticket = (await engine.tickets())[0]!
+    await executor.report(ticket.id, { kind: 'ready', text: 'done', at: 2000 })
+    const ended = (await engine.tickets())[0]!
+    expect(ended.status).toBe('ended')
+    const disposition = await engine.followUp(ended.id, makeTrigger({ id: 'tr2', text: 'one more fix' }))
+    expect(disposition).toBe('fannedOut')
+    const resumed = await kv.get<Ticket>(`ticket/${ended.id}`)
+    expect(resumed?.status).toBe('open')
+    expect(resumed?.mandateId).toBe(ended.mandateId)
+    expect(events.at(-1)).toMatchObject({ type: 'resume', ticketId: ended.id })
+  })
+
+  it('a stopped ticket may not be resumed', async () => {
+    const { engine, kv } = harness()
+    await engine.intake(makeTrigger())
+    const ticket = (await engine.tickets())[0]!
+    await engine.stop(ticket.id)
+    const disposition = await engine.followUp(ticket.id, makeTrigger({ id: 'tr2', text: 'try again' }))
+    expect(disposition).toBe('filtered')
+    const stopped = await kv.get<Ticket>(`ticket/${ticket.id}`)
+    expect(stopped?.outcome).toBe('stopped')
+  })
+
+  it('serializes evals on one thread: the second concurrent trigger fans out instead of opening work', async () => {
+    const { engine } = harness()
+    const results = await Promise.all([
+      engine.intake(makeTrigger({ id: 'trA', threadKey: 'session:s1' })),
+      engine.intake(makeTrigger({ id: 'trB', threadKey: 'session:s1' })),
+    ])
+    expect(results).toEqual(['evaluated', 'fannedOut'])
+    expect(await engine.tickets()).toHaveLength(1)
   })
 })
 
-describe('engine ticket lifecycle', () => {
-  const accepted = async () => {
-    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
-    const { engine } = setup(assessor)
-    await engine.intake(trigger())
+describe('LiteExecutor', () => {
+  it('dispatches one worker session per ticket with a briefing', async () => {
+    const { engine, executor, sessions } = harness()
+    await engine.intake(makeTrigger())
     const ticket = (await engine.tickets())[0]!
-    return { engine, ticket }
-  }
-
-  it('resumes an ended ticket on a person message under a holding mandate', async () => {
-    const { engine, ticket } = await accepted()
-    await engine.endTicket(ticket.id, 'completed')
-    const events: unknown[] = []
-    const engine2 = engine
-    engine2.onPersonMessage = (ticketId, text) => { events.push([ticketId, text]) }
-    expect(await engine2.intake(trigger({ id: 'trg_9', text: 'one more thing' }))).toBe('fannedOut')
-    expect((await engine.tickets())[0]!.status).toBe('open')
-    expect(events).toEqual([[ticket.id, 'one more thing']])
+    await executor.dispatch(ticket, ['fix the flaky test'])
+    expect(sessions.created).toEqual([`worker-${ticket.id}`])
+    expect(sessions.prompted).toHaveLength(1)
+    expect(sessions.prompted[0]!.text).toContain(`Ticket ${ticket.id}`)
+    expect(sessions.prompted[0]!.text).toContain('fix the flaky test')
   })
 
-  it('does not resume a ticket a person stopped, though a fresh request still evaluates', async () => {
-    const { engine, ticket } = await accepted()
-    const resumed: unknown[] = []
-    engine.onPersonMessage = (ticketId, text) => resumed.push([ticketId, text])
-    await engine.stop(ticket.id)
-    expect(await engine.intake(trigger({ id: 'trg_9' }))).toBe('evaluated')
-    expect(resumed).toEqual([])
-    expect((await engine.tickets()).find(t => t.id === ticket.id)).toMatchObject({ status: 'ended', outcome: 'stopped' })
-  })
-
-  it('dispatches a new ticket through the notify port when accepted', async () => {
-    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 'fix it' })])
-    const { engine, events } = setup(assessor)
-    await engine.intake(trigger())
-    expect(events).toContainEqual(expect.objectContaining({ type: 'dispatch', ticketId: expect.any(String) }))
-  })
-
-  it('queues an out-of-scope follow-up when its eval is unavailable instead of losing it', async () => {
-    const assessor = fakeAssessor([
-      () => ({ kind: 'accept', scope: 's' }),
-      () => ({ kind: 'unavailable' }),
-      () => ({ kind: 'accept', scope: 'the other work' }),
-    ])
-    const scoped = assessor as typeof assessor & {
-      classifyFollowUp?: (input: { trigger: Trigger; thread: ThreadState }) => Promise<{ inScope: boolean }>
-    }
-    scoped.classifyFollowUp = async ({ trigger: t }) => ({ inScope: t.id === 'trg_1' })
-    const { engine } = setup(scoped)
-    await engine.intake(trigger())
-    expect(await engine.intake(trigger({ id: 'trg_5' }))).toBe('evaluated')
-    expect((await engine.tickets())).toHaveLength(1)
-    await engine.retryPending('github:a/b:1')
-    expect((await engine.tickets())).toHaveLength(2)
-  })
-
-  it('routes follow-ups to the newest live ticket on the thread', async () => {
-    const assessor = fakeAssessor([
-      () => ({ kind: 'accept', scope: 'first' }),
-      () => ({ kind: 'accept', scope: 'second' }),
-    ])
-    const scoped = assessor as typeof assessor & {
-      classifyFollowUp?: (input: { trigger: Trigger; thread: ThreadState }) => Promise<{ inScope: boolean }>
-    }
-    scoped.classifyFollowUp = async ({ trigger: t }) => ({ inScope: t.id !== 'trg_5' })
-    const { engine, events } = setup(scoped)
-    await engine.intake(trigger())
-    await engine.intake(trigger({ id: 'trg_5', text: 'different work' }))
+  it('queues launches beyond the worker limit', async () => {
+    const { engine, executor, sessions } = harness(1)
+    await engine.intake(makeTrigger())
+    await engine.intake(makeTrigger({ id: 'tr2', text: 'second task', threadKey: 'session:s2' }))
     const tickets = await engine.tickets()
-    await engine.intake(trigger({ id: 'trg_9', text: 'a correction' }))
-    const fanout = events.filter(e => (e as { type: string }).type === 'fanout').at(-1) as { ticketId: string }
-    expect(fanout.ticketId).toBe(tickets.at(-1)!.id)
+    expect(tickets).toHaveLength(2)
+    // Both launches start without awaiting; only one session exists until the first releases its slot.
+    const launches = tickets.map(ticket => executor.dispatch(ticket, [ticket.id]))
+    await Promise.all(launches)
+    expect(sessions.created).toHaveLength(2)
   })
 
-  it('ends a ticket as dropped when a ready report follows an unmerged PR close', async () => {
-    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
-    const { engine } = setup(assessor)
-    await engine.intake(trigger())
+  it('a ready report ends the ticket; blocked holds further deliveries', async () => {
+    const { engine, executor, kv, sessions } = harness()
+    await engine.intake(makeTrigger())
     const ticket = (await engine.tickets())[0]!
-    await engine.followPr(ticket.id, 9)
-    await engine.prClosed(ticket.id, 9, false)
-    await engine.reportExternal(ticket.id, { kind: 'ready', text: 'done', at: 3 })
-    expect((await engine.tickets())[0]).toMatchObject({ status: 'ended', outcome: 'dropped' })
+    await executor.dispatch(ticket, ['fix the flaky test'])
+    const stored = await kv.get<Ticket>(`ticket/${ticket.id}`)
+    await executor.report(ticket.id, { kind: 'blocked', text: 'which branch?', at: 2000 })
+    let current = await kv.get<Ticket>(`ticket/${ticket.id}`)
+    expect(current?.attention?.question).toBe('which branch?')
+    await expect(executor.deliver(ticket.id, 'main')).rejects.toThrow(/held/)
+    executor.onPersonMessage(ticket.id)
+    await executor.report(ticket.id, { kind: 'progress', text: 'on main', at: 3000 })
+    await executor.deliver(ticket.id, 'target main')
+    expect(sessions.prompted.some(entry => entry.sessionID === stored!.sessionId && entry.text === 'target main')).toBe(true)
+    await executor.report(ticket.id, { kind: 'ready', text: 'done', at: 4000 })
+    current = await kv.get<Ticket>(`ticket/${ticket.id}`)
+    expect(current?.status).toBe('ended')
+    expect(current?.outcome).toBe('completed')
   })
 
-  it('stop marks the outcome and ends the ticket', async () => {
-    const { engine, ticket } = await accepted()
-    await engine.stop(ticket.id)
-    expect((await engine.tickets())[0]).toMatchObject({ status: 'ended', outcome: 'stopped' })
-  })
-
-  it('follows a pull request and ends the ticket only when it closes after a ready report', async () => {
-    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
-    const { engine, events } = setup(assessor)
-    await engine.intake(trigger())
+  it('stop interrupts the worker session', async () => {
+    const { engine, executor, kv, sessions } = harness()
+    await engine.intake(makeTrigger())
     const ticket = (await engine.tickets())[0]!
-    await engine.followPr(ticket.id, 42)
-    const followed = await engine.followedPrs(ticket.id)
-    expect(followed).toEqual([{ number: 42, open: true }])
-    expect(ticket.subscriptions).toContain('github:a/b:pr:42')
-
-    // PR still open: a ready report waits for review instead of ending.
-    await engine.reportExternal(ticket.id, { kind: 'ready', text: 'PR open', at: 2 })
-    expect((await engine.tickets())[0]!.status).toBe('open')
-
-    await engine.prClosed(ticket.id, 42, true)
-    expect((await engine.tickets())[0]).toMatchObject({ status: 'ended', outcome: 'completed' })
-    expect(events).toContainEqual(expect.objectContaining({ type: 'notice', ticketId: ticket.id }))
-  })
-
-  it('ends a ticket whose followed PR closed without merge as dropped', async () => {
-    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
-    const { engine } = setup(assessor)
-    await engine.intake(trigger())
-    const ticket = (await engine.tickets())[0]!
-    await engine.followPr(ticket.id, 7)
-    await engine.reportExternal(ticket.id, { kind: 'ready', text: 'ready', at: 2 })
-    await engine.prClosed(ticket.id, 7, false)
-    expect((await engine.tickets())[0]).toMatchObject({ status: 'ended', outcome: 'dropped' })
-  })
-
-  it('keeps a ticket open while another followed PR stays open', async () => {
-    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
-    const { engine } = setup(assessor)
-    await engine.intake(trigger())
-    const ticket = (await engine.tickets())[0]!
-    await engine.followPr(ticket.id, 1)
-    await engine.followPr(ticket.id, 2)
-    await engine.prClosed(ticket.id, 1, true)
-    expect((await engine.tickets())[0]!.status).toBe('open')
+    await executor.dispatch(ticket, ['fix the flaky test'])
+    const stored = await kv.get<Ticket>(`ticket/${ticket.id}`)
+    await executor.stop(ticket.id)
+    expect(sessions.interrupted).toEqual([stored!.sessionId])
   })
 })

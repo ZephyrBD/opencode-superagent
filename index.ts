@@ -1,17 +1,9 @@
+import { createHash } from 'node:crypto'
 import { Plugin } from '@opencode/plugin'
 import { z } from 'zod'
-import { Engine } from './core/engine.ts'
-import { Executor, type SessionPort, type WorktreePort } from './core/executor.ts'
-import { LlmAssessor, type GeneratePort } from './core/assessor.ts'
-import { FallbackAssessor, SessionOrchestrator } from './core/orchestrator.ts'
-import { Outbox } from './core/outbox.ts'
-import type { KV } from './core/kv.ts'
-import { ReportSchema, type Ticket } from './core/model.ts'
-import { GitHubSource } from './sources/github/index.ts'
-import { FeishuSource, type FeishuCli } from './sources/feishu/index.ts'
-import { cliFeishuCli } from './sources/feishu/cli.ts'
-import { startPanel } from './panel/http.ts'
-import type { Assignment } from './core/assignment.ts'
+import { LiteEngine, ReportSchema, TicketSchema, type Disposition, type EngineEvent, type Ticket, type Trigger } from './core.ts'
+import { LiteExecutor, type SessionPort, type WorktreePort } from './executor.ts'
+import type { KV } from './kv.ts'
 
 export interface ToolContext {
   sessionID?: string
@@ -20,54 +12,35 @@ export interface ToolContext {
 export interface ToolDefinition {
   name: string
   description: string
+  /** JSON Schema for the tool input; a default `ticket` schema applies when omitted. */
+  input?: Record<string, unknown>
   execute: (input: unknown, context?: ToolContext) => Promise<unknown>
 }
 
 export interface ToolEditor {
-  namespace(ns: { name: string; description: string }): void
   add(tool: ToolDefinition): void
-  update(id: string, update: (tool: ToolDefinition) => void): void
-  remove(id: string): void
 }
 
 export interface AssembleDeps {
   kv: KV
   sessions: SessionPort
-  worktrees: WorktreePort
-  token: string
+  worktrees?: WorktreePort
   tools: ToolEditor
-  generate?: GeneratePort
-  poll?: () => Promise<unknown>
-  recover?: () => Promise<void>
-  resumeDispatch?: () => Promise<void>
-  setIntervalFn?: (fn: () => void, ms: number) => unknown
-  clearIntervalFn?: (handle: unknown) => void
-  panel?: { port?: number }
-  /** The write side of GitHub origin threads; PR outcome notices go out through it. */
-  channel?: { reply(threadKey: string, text: string): Promise<void> }
-  /** The write side of Feishu origin threads. */
-  feishuChannel?: { reply(threadKey: string, text: string): Promise<void> }
-  /** Optional Feishu Source with its chat config; polls alongside GitHub when provided. */
-  feishu?: { cli: FeishuCli; config?: { chats: Array<{ id: string; listen: 'mentions' | 'all' }>; pollSeconds: number } }
-  /** GitHub Source wiring; constructed once so health state accumulates across polls. */
-  github?: {
-    config: { repository: string; allowedActors: string[]; pollSeconds: number; agentLogin: string }
-    fetchJSON(url: string, init?: RequestInit): Promise<{ status: number; json(): Promise<unknown> }>
-    fetchThread(apiUrl: string): Promise<{ number: number; comments: Array<{ id: number; body: string; html_url: string; created_at: string; user: { login: string; type: string } }>; state: string }>
-  }
-  /** Policy overrides: repository and allowed actors are the operator's decision. */
-  config?: { repository?: string; allowedActors?: string[]; policyVersion?: string }
+  /** Concurrent worker slots. */
+  workerLimit?: number
+  /** A `#t3 text` reference routes to that ticket without an eval. */
+  followUpRef?: RegExp
 }
 
 export interface AssembledApp {
-  engine: Engine
-  executor: Executor
-  outbox: Outbox
-  githubSource?: GitHubSource
-  /** Runs one poll across every enabled source. */
-  pollAll(): Promise<unknown[]>
+  engine: LiteEngine
+  executor: LiteExecutor
+  /** One session message: routes to a referenced ticket, or opens new work. */
+  submit(sessionID: string, text: string): Promise<Disposition>
   start(): Promise<void>
   cleanup(): Promise<void>
+  /** Tests may inspect what the notify wiring received. */
+  events: EngineEvent[]
 }
 
 const ReportInputSchema = z.object({
@@ -76,78 +49,94 @@ const ReportInputSchema = z.object({
   text: z.string(),
 }).strict()
 
-/** Wires the domain objects and the OpenCode-side layer together. Pure: tests drive it with fakes. */
+const FollowUpInputSchema = z.string().min(1)
+
+const threadKeyOf = (sessionID: string) => `session:${sessionID}`
+/** Content hash: the same message resubmitted is the same trigger, so intake stays idempotent. */
+const triggerIdOf = (sessionID: string, text: string) =>
+  `t-${createHash('sha1').update(`${sessionID}\u0000${text}`).digest('hex').slice(0, 16)}`
+
+/** Wires the domain objects together. Pure: tests drive it with fakes. */
 export const assemble = (deps: AssembleDeps): AssembledApp => {
-  const outbox = new Outbox({
+  const events: EngineEvent[] = []
+  const engine = new LiteEngine({
     kv: deps.kv,
     clock: () => Date.now(),
-    delay: ms => new Promise(resolve => setTimeout(resolve, ms)),
-    send: async (kind, payload) => {
-      const { ticketId, inputs } = payload as { ticketId: string; inputs: string[] }
-      const ticket = await deps.kv.get<Ticket>(`ticket/${ticketId}`)
-      if (!ticket) return
-      if (kind === 'dispatch') {
-        // A replayed dispatch never reopens an ended ticket.
-        if (ticket.status !== 'open') return
-        await executor.dispatch(ticket, inputs)
+    newTicketId: (() => {
+      let next = 1
+      return () => `t${next++}`
+    })(),
+    newMandateId: (() => {
+      let next = 1
+      return () => `m${next++}`
+    })(),
+    newDecisionId: (() => {
+      let next = 1
+      return () => `d${next++}`
+    })(),
+    notify: event => {
+      events.push(event)
+      if (event.type === 'accept') void executor.dispatch(event.ticket, [event.trigger.text]).catch(() => {})
+      if (event.type === 'fanout') void executor.deliver(event.ticketId, event.text).catch(() => {})
+      if (event.type === 'resume') {
+        executor.onPersonMessage(event.ticketId)
+        void executor.deliver(event.ticketId, event.text).catch(() => {})
       }
-      if (kind === 'deliver') {
-        if (ticket.status !== 'open') return
-        await executor.deliver(ticketId, inputs.join('\n'), (payload as { key?: string }).key)
-      }
-      if (kind === 'notice') {
-        const origin = ticket.subscriptions[0]
-        if (!origin || origin.includes(':pr:')) return
-        const text = (payload as { text: string }).text
-        if (origin.startsWith('feishu:')) {
-          if (!deps.feishuChannel) return
-          await deps.feishuChannel.reply(origin, text)
-          return
-        }
-        if (!deps.channel) return
-        await deps.channel.reply(origin, text)
-      }
+      if (event.type === 'stop') void executor.stop(event.ticketId).catch(() => {})
     },
+  })
+  const executor = new LiteExecutor({
+    sessions: deps.sessions,
+    worktrees: deps.worktrees,
+    kv: deps.kv,
+    limit: deps.workerLimit,
   })
 
-  const executor = new Executor({ sessions: deps.sessions, worktrees: deps.worktrees, kv: deps.kv, limit: 3 })
-  const llmAssessor = new LlmAssessor({ generate: deps.generate ?? { text: async () => ({ text: '{"kind":"unavailable"}' }) } })
-  const orchestrator = new SessionOrchestrator({ sessions: deps.sessions, fallback: llmAssessor })
-  const assessor = new FallbackAssessor(orchestrator, llmAssessor)
-  const engine = new Engine({
-    kv: deps.kv,
-    policy: {
-      policyVersion: deps.config?.policyVersion ?? 'v1',
-      paused: false,
-      proactive: 'record',
-      github: {
-        repository: deps.config?.repository ?? 'owner/repo',
-        allowedActors: deps.config?.allowedActors ?? [],
-        pollSeconds: 60,
-        agentLogin: 'agent-bot',
-      },
-    },
-    assessor,
-    clock: () => Date.now(),
-    notify: event => {
-      if (event.type === 'fanout') {
-        void outbox.enqueue('deliver', { ticketId: event.ticketId, inputs: [event.trigger.text], key: event.trigger.id }).catch(() => {})
+  const followUpRef = deps.followUpRef ?? /^#(\S+)\s+([\s\S]+)$/
+
+  const app: AssembledApp = {
+    engine,
+    executor,
+    events,
+    async submit(sessionID, text) {
+      const trigger: Trigger = {
+        id: triggerIdOf(sessionID, text),
+        source: 'session',
+        actorId: 'operator',
+        text,
+        threadKey: threadKeyOf(sessionID),
+        at: Date.now(),
       }
-      if (event.type === 'notice') {
-        void outbox.enqueue('notice', { ticketId: event.ticketId, text: event.text }).catch(() => {})
+      const ref = text.match(followUpRef)
+      if (ref) {
+        const disposition = await engine.followUp(ref[1]!, {
+          ...trigger,
+          text: ref[2]!,
+        })
+        if (disposition !== 'filtered') return disposition
+        // Unknown or stopped reference falls through to a normal eval on the thread.
       }
+      return engine.intake(trigger)
     },
-  })
-  // A person's message releases a held ticket and its text reaches the worker through the outbox,
-  // so a failed delivery is retried instead of lost.
-  engine.onPersonMessage = (ticketId, text) => {
-    executor.onPersonMessage(ticketId)
-    void outbox.enqueue('deliver', { ticketId, inputs: [text] }).catch(() => {})
+    async start() {
+      await executor.recover()
+    },
+    async cleanup() {},
   }
 
   deps.tools.add({
     name: 'superagent_report_ticket',
     description: 'Report the structured state of your ticket: progress, waiting, ready, blocked, failed or dropped.',
+    input: {
+      type: 'object',
+      properties: {
+        ticket: { type: 'string', description: 'The ticket id, as given in your briefing.' },
+        kind: { type: 'string', enum: ['progress', 'waiting', 'ready', 'blocked', 'failed', 'dropped'] },
+        text: { type: 'string', description: 'One short factual sentence.' },
+      },
+      required: ['ticket', 'kind', 'text'],
+      additionalProperties: false,
+    },
     execute: async (rawInput, context) => {
       const input = ReportInputSchema.parse(rawInput)
       const ticket = await deps.kv.get<Ticket>(`ticket/${input.ticket}`)
@@ -161,94 +150,44 @@ export const assemble = (deps: AssembleDeps): AssembledApp => {
     },
   })
 
-  let handle: unknown
-  let timerSet = false
-  const closePanel = { close: async () => {} }
-  const githubSource = deps.github
-    ? new GitHubSource({
-        config: deps.github.config,
-        token: deps.token,
-        kv: deps.kv,
-        fetchJSON: deps.github.fetchJSON,
-        fetchThread: deps.github.fetchThread,
-        intake: trigger => engine.intake(trigger),
-        follow: async (ticketId, number, head) => {
-          await engine.followPr(ticketId, number)
-          void head
-        },
-        prClosed: (ticketId, number, merged) => engine.prClosed(ticketId, number, merged),
-      })
-    : undefined
-  const feishuSource = deps.feishu
-    ? new FeishuSource({
-        config: deps.feishu.config ?? { chats: [], pollSeconds: 30 },
-        cli: deps.feishu.cli,
-        kv: deps.kv,
-        intake: trigger => engine.intake(trigger),
-      })
-    : undefined
-  const app: AssembledApp = {
-    engine,
-    executor,
-    outbox,
-    githubSource,
-    async pollAll() {
-      const results: Promise<unknown>[] = []
-      if (githubSource) results.push(githubSource.pollOnce())
-      if (feishuSource) results.push(feishuSource.pollOnce())
-      if (deps.poll) results.push(deps.poll())
-      return Promise.all(results)
-    },
-    async start() {
-      // Recover stored work first: a reload or crash must replay it before anything new launches.
-      if (deps.recover) await deps.recover()
-      else await outbox.recover()
-      await executor.rebuild()
-      // A restart ends running assignments; each open ticket starts again, oldest first, with a
-      // recovery note. Tickets a person must answer stay held: restarting the host must not
-      // launch a turn a blocked worker is not asking for.
-      const tickets = (await deps.kv.scan('ticket/')).map(row => row.value as Ticket)
-      const runningIds = new Set(
-        (await deps.kv.scan('assignment/'))
-          .map(row => row.value as Assignment)
-          .filter(assignment => assignment.status === 'running')
-          .map(assignment => assignment.ticketId),
-      )
-      const toRecover = tickets
-        .filter(ticket => {
-          if (ticket.status !== 'open' || !runningIds.has(ticket.id)) return false
-          const last = ticket.reports.at(-1)
-          return last?.kind !== 'blocked' && last?.kind !== 'failed'
-        })
-        .sort((a, b) => a.id.localeCompare(b.id))
-      for (const ticket of toRecover) await executor.recoverTicket(ticket)
-      if (deps.resumeDispatch) await deps.resumeDispatch()
-      for (const key of await engine.pendingThreads()) await engine.retryPending(key)
-      if (deps.panel) {
-        const panel = await startPanel({ kv: deps.kv }, { port: deps.panel.port })
-        closePanel.close = panel.close
-      }
-      if (deps.poll || feishuSource) {
-        const tick = () => void app.pollAll().catch(() => {})
-        const set = deps.setIntervalFn ?? ((fn: () => void, ms: number) => setInterval(fn, ms))
-        handle = set(tick, 60_000)
-        timerSet = true
+  deps.tools.add({
+    name: 'superagent_tickets',
+    description: 'List every ticket with its status, latest report and pending attention question.',
+    execute: async () => {      const tickets = await engine.tickets()
+      return {
+        content: tickets
+          .map(ticket => {
+            const last = ticket.reports.at(-1)
+            const attention = ticket.attention ? ` attention: ${ticket.attention.question}` : ''
+            return `${ticket.id} ${ticket.status}${ticket.outcome ? ` (${ticket.outcome})` : ''}${last ? ` — ${last.kind}: ${last.text}` : ''}${attention}`
+          })
+          .join('\n') || 'no tickets',
       }
     },
-    async cleanup() {
-      const clear = deps.clearIntervalFn ?? ((h: unknown) => clearInterval(h as ReturnType<typeof setInterval>))
-      if (timerSet) clear(handle)
-      timerSet = false
-      handle = undefined
-      await closePanel.close()
+  })
+
+  deps.tools.add({
+    name: 'superagent_stop_ticket',
+    description: 'Stop a ticket: the worker is interrupted and the mandate loses its force.',
+    input: {
+      type: 'object',
+      properties: { ticket: { type: 'string', description: 'The ticket id.' } },
+      required: ['ticket'],
+      additionalProperties: false,
     },
-  }
+    execute: async rawInput => {
+      const input = z.object({ ticket: FollowUpInputSchema }).strict().parse(rawInput)
+      await engine.stop(input.ticket)
+      return { content: `stopped ${input.ticket}` }
+    },
+  })
+
   return app
 }
 
 // The OpenCode plugin shell. The domain above is plain code; this is the only OpenCode-specific part.
 export default Plugin.define({
-  id: 'opencode-superagent',
+  id: 'opencode-superagent-lite',
   async setup(ctx) {
     const kv: KV = {
       get: key => ctx.storage.get(key) as Promise<never>,
@@ -269,101 +208,50 @@ export default Plugin.define({
       create: (title: string) => ctx.session.create({ title }).then(info => ({ sessionID: info.id })),
       prompt: (sessionID: string, text: string) => ctx.session.prompt({ sessionID, text }).then(() => {}),
       interrupt: (sessionID: string) => ctx.session.interrupt({ sessionID }).then(() => {}),
-      lastAssistantText: async sessionID => {
-        const messages = await ctx.session.context({ sessionID })
-        const last = messages.at(-1)
-        return typeof last === 'object' && last && 'text' in last ? String((last as { text?: unknown }).text ?? '') : ''
-      },
     }
     const projectID = ctx.location.project.id
     const worktrees: WorktreePort = {
       create: (name: string) => ctx.worktree.create({ projectID, name }),
     }
-    const generate: GeneratePort = {
-      text: async opts => ctx.experimental.generate.text({ prompt: opts.prompt }),
-    }
+    const config = (ctx.options ?? {}) as { workerLimit?: number }
     const toolsAdapter: ToolEditor = {
-      namespace: () => {},
       add: tool => {
         void ctx.tool.transform(editor => {
           editor.add({
             name: tool.name,
             description: tool.description,
-            input: {
+            input: tool.input ?? {
               type: 'object',
-              properties: {
-                ticket: { type: 'string', description: 'The ticket id, as given in your briefing.' },
-                kind: { type: 'string', enum: ['progress', 'waiting', 'ready', 'blocked', 'failed', 'dropped'] },
-                text: { type: 'string', description: 'One short factual sentence.' },
-              },
-              required: ['ticket', 'kind', 'text'],
+              properties: { ticket: { type: 'string', description: 'The ticket id.' } },
+              required: ['ticket'],
               additionalProperties: false,
             },
             execute: (input, context) => tool.execute(input, { sessionID: context.sessionID }) as Promise<never>,
           })
         })
       },
-      update: () => {},
-      remove: () => {},
-    }
-    const config = (ctx.options ?? {}) as {
-      repository?: string
-      allowedActors?: string[]
-      pollSeconds?: number
-      agentLogin?: string
-      panelPort?: number
-      feishu?: { chats?: Array<{ id: string; listen: 'mentions' | 'all' }>; pollSeconds?: number; cliPath?: string }
-    }
-    const repository = config.repository ?? 'owner/repo'
-    const token = process.env.GITHUB_TOKEN ?? ''
-    const agentLogin = config.agentLogin ?? 'agent-bot'
-    const allowedActors = config.allowedActors ?? []
-    const githubFetch = async (url: string, init?: RequestInit) => {
-      const response = await fetch(url, init)
-      return { status: response.status, json: () => response.json(), headers: response.headers }
     }
 
     const app = assemble({
       kv,
       sessions,
       worktrees,
-      token,
       tools: toolsAdapter,
-      generate,
-      config: { repository, allowedActors },
-      panel: { port: config.panelPort },
-      channel: {
-        reply: async (threadKey, text) => {
-          const [, repo, , number] = threadKey.split(':')
-          await fetch(`https://api.github.com/repos/${repo}/issues/${number}/comments`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ body: text }),
-          })
-        },
-      },
-      feishuChannel: {
-        reply: async (threadKey, text) => {
-          const [, conversation, root] = threadKey.split(':')
-          if (!conversation || !root) return
-          await cliFeishuCli(config.feishu?.cliPath ?? 'lark-cli').reply(conversation, root, `notice-${conversation}-${root}`, text)
-        },
-      },
-      github: {
-        config: { repository, allowedActors, pollSeconds: config.pollSeconds ?? 60, agentLogin },
-        fetchJSON: githubFetch,
-        fetchThread: async apiUrl => {
-          const response = await fetch(apiUrl, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } })
-          return response.json() as never
-        },
-      },
-      feishu: config.feishu?.chats?.length
-        ? {
-            cli: cliFeishuCli(config.feishu.cliPath ?? 'lark-cli'),
-            config: { chats: config.feishu.chats, pollSeconds: config.feishu.pollSeconds ?? 30 },
-          }
-        : undefined,
+      workerLimit: config.workerLimit,
     })
+
+    await ctx.command.transform(editor => {
+      editor.add({
+        name: 'work',
+        description: 'Submit work to the superagent: "/work <task>", or "/work #t3 <note>" to reach ticket t3 directly.',
+        execute: async ({ sessionID, prompt }) => {
+          const text = prompt.text.trim()
+          if (!text) return
+          await app.submit(sessionID, text)
+        },
+      })
+    })
+
     await app.start()
     return () => app.cleanup()
   },

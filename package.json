@@ -1,13 +1,12 @@
 {
-  "name": "@zephyrbd/opencode-superagent",
+  "name": "@zephyrbd/opencode-superagent-lite",
   "version": "0.1.0",
+  "description": "Lite branch of opencode-superagent: the session itself is the only Source. Trigger → explicit-gate Eval → Ticket + Mandate → Executor (one session and worktree per ticket) → structured Report, with no external dependencies.",
   "type": "module",
   "exports": {
     ".": "./index.ts"
   },
-  "description": "A proactive coding agent plugin for OpenCode, adapted from dsh-superagent: Sources produce Triggers, Eval accepts authorized work as Tickets with Mandates, Executors run each Ticket in its own session and worktree.",
   "scripts": {
-    "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "pnpm typecheck && pnpm test"
