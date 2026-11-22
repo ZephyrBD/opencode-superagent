@@ -98,6 +98,36 @@ describe('engine intake', () => {
     expect(await engine.intake(trigger({ id: 'trg_3', actor: { id: 'ci-bot', bot: true } }))).toBe('filtered')
   })
 
+  it('hands a follow-up back to Eval when the assessor rules it out of scope', async () => {
+    const assessor = fakeAssessor([
+      () => ({ kind: 'accept', scope: 's' }),
+      () => ({ kind: 'accept', scope: 'different work' }),
+    ])
+    const scoped = assessor as typeof assessor & {
+      classifyFollowUp?: (input: { trigger: Trigger; thread: ThreadState }) => Promise<{ inScope: boolean }>
+    }
+    scoped.classifyFollowUp = async ({ trigger: t }) => ({ inScope: t.id === 'trg_1' })
+    const { engine, events } = setup(scoped)
+    await engine.intake(trigger())
+    const other = trigger({ id: 'trg_5', text: 'also migrate the database' })
+    expect(await engine.intake(other)).toBe('evaluated')
+    expect((await engine.tickets())).toHaveLength(2)
+    expect(events.filter(e => (e as { type: string }).type === 'fanout')).toHaveLength(0)
+  })
+
+  it('fans an in-scope follow-up out without an extra eval', async () => {
+    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
+    const scoped = assessor as typeof assessor & {
+      classifyFollowUp?: (input: { trigger: Trigger; thread: ThreadState }) => Promise<{ inScope: boolean }>
+    }
+    scoped.classifyFollowUp = async () => ({ inScope: true })
+    const { engine, events } = setup(assessor)
+    await engine.intake(trigger())
+    expect(await engine.intake(trigger({ id: 'trg_6', text: 'also update the docs' }))).toBe('fannedOut')
+    expect((await engine.tickets())).toHaveLength(1)
+    expect(events.filter(e => (e as { type: string }).type === 'fanout')).toHaveLength(1)
+  })
+
   it('queues a trigger when the assessor fails and retries it later', async () => {
     const assessor = fakeAssessor([
       () => { throw new Error('model down') },

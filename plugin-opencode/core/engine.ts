@@ -7,6 +7,8 @@ import { gate, revalidate } from './policy.ts'
 /** The model's judgement layer of Eval: turns a batch onto a thread into a decision. Deterministic gate runs before it. */
 export interface Assessor {
   assess(input: { batch: Trigger[]; thread: ThreadState; tickets: readonly Ticket[] }): Promise<Decision>
+  /** Optional: decides whether a person's follow-up on a live ticket's thread belongs to that ticket. */
+  classifyFollowUp?(input: { trigger: Trigger; thread: ThreadState }): Promise<{ inScope: boolean }>
 }
 
 export interface ThreadState {
@@ -87,6 +89,27 @@ export class Engine {
     // A person's message on a ticket's own thread reaches it without an eval.
     // Pause stops input delivery too: triggers are recorded, nothing is fanned out.
     if (this.policy.paused) return await this.record(thread, trigger, 'recorded')
+    // A person's message on a live ticket's thread reaches it without an eval — unless the
+    // assessor hands it back, in which case it becomes a new-work candidate like any other.
+    const liveTarget = live[0]
+    if (liveTarget && this.assessor.classifyFollowUp) {
+      const { inScope } = await this.assessor.classifyFollowUp({ trigger, thread })
+      if (!inScope) {
+        thread.triggers.push(trigger)
+        const verdictFor = gate(this.policy, trigger, tickets.filter((t): t is Ticket => t !== undefined))
+        if (verdictFor.admissible && !verdictFor.recordOnly) {
+          const decision = await this.assess(thread, tickets.filter((t): t is Ticket => t !== undefined))
+          if (decision.kind === 'accept') {
+            const newTicket = await this.openTicket(trigger, decision, verdictFor.strength)
+            thread.ticketIds.push(newTicket.id)
+            await this.kv.set(threadKeyOf(thread.key), thread)
+            return await this.record(thread, trigger, 'evaluated')
+          }
+        }
+        await this.kv.set(threadKeyOf(thread.key), thread)
+        return await this.record(thread, trigger, 'filtered')
+      }
+    }
     const resumable = !trigger.actor.bot && (live.length > 0 || ended.find(t => t.outcome !== 'stopped'))
     if (resumable) {
       const target = live[0] ?? ended.find(t => t.outcome !== 'stopped')!

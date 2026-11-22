@@ -7,6 +7,8 @@ export interface SessionPort {
   create(title: string, agent?: string): Promise<{ sessionID: string }>
   prompt(sessionID: string, text: string): Promise<void>
   interrupt(sessionID: string): Promise<void>
+  /** Reads the session's latest assistant text; the orchestrator parses its verdict out of it. */
+  lastAssistantText?(sessionID: string): Promise<string>
 }
 
 export interface WorktreePort {

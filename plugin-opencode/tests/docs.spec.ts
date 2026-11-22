@@ -34,8 +34,16 @@ describe('plugin README', () => {
   })
 
   it('references prompt files that exist', () => {
-    for (const name of ['prompts/assessor.md', 'prompts/worker.md', 'prompts/shared.md']) {
+    for (const name of ['prompts/assessor.md', 'prompts/worker.md', 'prompts/shared.md', 'prompts/orchestrator.md']) {
       expect(existsSync(resolve(ROOT, name)), `${name} missing`).toBe(true)
     }
+  })
+
+  it('keeps the orchestrator prompt honest about routing', () => {
+    const orchestrator = read('prompts/orchestrator.md')
+    expect(orchestrator).toContain('hand it back')
+    expect(orchestrator).toContain('When in doubt between accept and ignore, ignore')
+    const worker = read('prompts/worker.md')
+    expect(worker).toContain('Report honestly')
   })
 })

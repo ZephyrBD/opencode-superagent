@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { Engine } from './core/engine.ts'
 import { Executor, type SessionPort, type WorktreePort } from './core/executor.ts'
 import { LlmAssessor, type GeneratePort } from './core/assessor.ts'
+import { FallbackAssessor, SessionOrchestrator } from './core/orchestrator.ts'
 import { Outbox } from './core/outbox.ts'
 import type { KV } from './core/kv.ts'
 import { ReportSchema, type Ticket } from './core/model.ts'
@@ -81,7 +82,9 @@ export const assemble = (deps: AssembleDeps): AssembledApp => {
   })
 
   const executor = new Executor({ sessions: deps.sessions, worktrees: deps.worktrees, kv: deps.kv, limit: 3 })
-  const assessor = new LlmAssessor({ generate: deps.generate ?? { text: async () => ({ text: '{"kind":"unavailable"}' }) } })
+  const llmAssessor = new LlmAssessor({ generate: deps.generate ?? { text: async () => ({ text: '{"kind":"unavailable"}' }) } })
+  const orchestrator = new SessionOrchestrator({ sessions: deps.sessions, fallback: llmAssessor })
+  const assessor = new FallbackAssessor(orchestrator, llmAssessor)
   const engine = new Engine({
     kv: deps.kv,
     policy: {
@@ -196,6 +199,11 @@ export default Plugin.define({
       create: (title: string) => ctx.session.create({ title }).then(info => ({ sessionID: info.id })),
       prompt: (sessionID: string, text: string) => ctx.session.prompt({ sessionID, text }).then(() => {}),
       interrupt: (sessionID: string) => ctx.session.interrupt({ sessionID }).then(() => {}),
+      lastAssistantText: async sessionID => {
+        const messages = await ctx.session.context({ sessionID })
+        const last = messages.at(-1)
+        return typeof last === 'object' && last && 'text' in last ? String((last as { text?: unknown }).text ?? '') : ''
+      },
     }
     const projectID = ctx.location.project.id
     const worktrees: WorktreePort = {
