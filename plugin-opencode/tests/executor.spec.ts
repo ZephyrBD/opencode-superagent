@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { Executor } from '../core/executor.ts'
 import type { SessionPort, WorktreePort } from '../core/executor.ts'
 import { MemoryKV } from '../core/kv.ts'
+import type { Assignment } from '../core/assignment.ts'
 import type { Ticket } from '../core/model.ts'
+
+const assignmentsOf = async (kv: ReturnType<typeof MemoryKV>): Promise<Assignment[]> =>
+  (await kv.scan('assignment/')).map(row => row.value as Assignment)
 
 const fakeSessions = (): SessionPort & { prompts: { sessionID: string; text: string }[]; created: number } => {
   const prompts: { sessionID: string; text: string }[] = []
@@ -38,10 +42,75 @@ const ticket = (over: Partial<Ticket> = {}): Ticket => ({
   status: 'open',
   subscriptions: [],
   reports: [],
+  assignmentIds: [],
   ...over,
 })
 
 describe('executor', () => {
+  it('re-delivers unread inputs on a new assignment and stops after a report confirms them', async () => {
+    const kv = MemoryKV()
+    const sessions = fakeSessions()
+    const executor = new Executor({ sessions, worktrees: fakeWorktrees(), kv, limit: 2 })
+    const t = ticket()
+    await executor.dispatch(t, ['first'])
+    await executor.deliver(t.id, 'unread follow-up')
+    // No report yet: the message is unconfirmed, so a replacement assignment carries it again.
+    await executor.dispatch(t, ['second'])
+    const last = sessions.prompts.at(-1)!.text
+    expect(last).toContain('unread follow-up')
+    expect(last).toContain('second')
+    // A report confirms delivery: the next assignment starts clean.
+    await executor.report(t.id, { kind: 'progress', text: 'got it', at: 3 })
+    await executor.dispatch(t, ['third'])
+    expect(sessions.prompts.at(-1)!.text).not.toContain('unread follow-up')
+  })
+
+  it('retries transient launch failures with backoff and fails the ticket on a persistent one', async () => {
+    const kv = MemoryKV()
+    let attempts = 0
+    const flaky: SessionPort = {
+      create: async () => ({ sessionID: 'sess_x' }),
+      prompt: async () => {
+        attempts += 1
+        if (attempts <= 2) throw new Error('fetch failed: ECONNRESET')
+      },
+      interrupt: async () => {},
+    }
+    const executor = new Executor({ sessions: flaky, worktrees: fakeWorktrees(), kv, limit: 2, delay: async () => {} })
+    const t = ticket()
+    await executor.dispatch(t, ['x'])
+    expect(attempts).toBe(3)
+
+    const persistent: SessionPort = {
+      create: async () => ({ sessionID: 'sess_y' }),
+      prompt: async () => { throw new Error('HTTP 404 from github') },
+      interrupt: async () => {},
+    }
+    const executor2 = new Executor({ sessions: persistent, worktrees: fakeWorktrees(), kv, limit: 2, delay: async () => {} })
+    const t2 = ticket({ id: 'tkt_2' })
+    await executor2.dispatch(t2, ['x'])
+    expect(t2.reports.at(-1)?.kind).toBe('failed')
+  })
+
+  it('creates an assignment per dispatch and ends it with a reason', async () => {
+    const kv = MemoryKV()
+    const executor = new Executor({ sessions: fakeSessions(), worktrees: fakeWorktrees(), kv, limit: 2 })
+    const t = ticket()
+    await executor.dispatch(t, ['first'])
+    let rows = await assignmentsOf(kv)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ ticketId: 'tkt_1', status: 'running' })
+    expect(t.assignmentIds).toHaveLength(1)
+    const [first] = rows
+    await executor.endAssignment(first!.id, 'replaced')
+    rows = await assignmentsOf(kv)
+    expect(rows[0]).toMatchObject({ status: 'ended', endReason: 'replaced' })
+    await executor.dispatch(t, ['second'])
+    rows = await assignmentsOf(kv)
+    expect(rows).toHaveLength(2)
+    expect(t.assignmentIds).toHaveLength(2)
+  })
+
   it('dispatches a ticket into a new worktree and worker session with a briefing prompt', async () => {
     const sessions = fakeSessions()
     const worktrees = fakeWorktrees()

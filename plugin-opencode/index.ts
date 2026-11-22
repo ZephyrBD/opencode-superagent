@@ -8,6 +8,7 @@ import type { KV } from './core/kv.ts'
 import { ReportSchema, type Ticket } from './core/model.ts'
 import { GitHubSource } from './sources/github/index.ts'
 import { startPanel } from './panel/http.ts'
+import type { Assignment } from './core/assignment.ts'
 
 export interface ToolContext {
   sessionID?: string
@@ -137,6 +138,18 @@ export const assemble = (deps: AssembleDeps): AssembledApp => {
       if (deps.recover) await deps.recover()
       else await outbox.recover()
       await executor.rebuild()
+      // A restart ends running assignments; each open ticket starts again, oldest first, with a recovery note.
+      const tickets = (await deps.kv.scan('ticket/')).map(row => row.value as Ticket)
+      const runningIds = new Set(
+        (await deps.kv.scan('assignment/'))
+          .map(row => row.value as Assignment)
+          .filter(assignment => assignment.status === 'running')
+          .map(assignment => assignment.ticketId),
+      )
+      const toRecover = tickets
+        .filter(ticket => ticket.status === 'open' && runningIds.has(ticket.id))
+        .sort((a, b) => a.id.localeCompare(b.id))
+      for (const ticket of toRecover) await executor.recoverTicket(ticket)
       if (deps.resumeDispatch) await deps.resumeDispatch()
       for (const key of await engine.pendingThreads()) await engine.retryPending(key)
       if (deps.panel) {

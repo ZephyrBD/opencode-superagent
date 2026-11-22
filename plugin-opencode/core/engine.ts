@@ -178,6 +178,8 @@ export class Engine {
       status: 'open',
       subscriptions: [trigger.threadKey],
       reports: [],
+      assignmentIds: [],
+      deliveryFailed: false,
     }
     await this.kv.set(ticketKeyOf(ticket.id), ticket)
     return ticket

@@ -1,25 +1,35 @@
 import { createServer, type Server } from 'node:http'
 import type { KV } from '../core/kv.ts'
+import type { Assignment } from '../core/assignment.ts'
 import type { Ticket } from '../core/model.ts'
-
-const ATTENTION = new Set(['blocked', 'failed'])
+import { isPersonStage, stageOf } from '../core/stage.ts'
 
 const escapeHtml = (text: string): string =>
   text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;')
 
+const waitingText = (ticket: Ticket): string => {
+  if (ticket.attention) return ticket.attention.question
+  if (ticket.deliveryFailed) return 'input delivery is being retried'
+  const last = ticket.reports.at(-1)
+  return last?.text ?? 'starting'
+}
+
 /** A healthy state takes no space: the page lists first what needs a person, then one line per ticket. */
 export const startPanel = async (deps: { kv: KV }, opts: { port?: number } = {}): Promise<{ url: string; close(): Promise<void> }> => {
   const server: Server = createServer(async (_request, response) => {
-    const rows = await deps.kv.scan('ticket/')
-    const tickets = rows.map(row => row.value as Ticket)
-    const attention = tickets.filter(t => t.reports.at(-1) && ATTENTION.has(t.reports.at(-1)!.kind))
-    const others = tickets.filter(t => !attention.includes(t))
+    const tickets = (await deps.kv.scan('ticket/')).map(row => row.value as Ticket)
+    const assignments = (await deps.kv.scan('assignment/')).map(row => row.value as Assignment)
+    const assignmentsOf = (ticket: Ticket): Assignment[] =>
+      assignments.filter(assignment => ticket.assignmentIds?.includes(assignment.id))
+    const withStage = tickets.map(ticket => ({ ticket, stage: stageOf(ticket, assignmentsOf(ticket), false) }))
+    const attention = withStage.filter(({ stage }) => isPersonStage(stage))
+    const others = withStage.filter(({ stage }) => !isPersonStage(stage))
     const url = _request.url ?? '/'
     if (url === '/api/state') {
       response.setHeader('Content-Type', 'application/json')
       response.end(JSON.stringify({
-        attention: attention.map(t => ({ id: t.id, waiting: t.reports.at(-1)!.text })),
-        tickets: others.map(t => ({ id: t.id, status: t.status, last: t.reports.at(-1)?.kind })),
+        attention: attention.map(({ ticket, stage }) => ({ id: ticket.id, stage, waiting: waitingText(ticket) })),
+        tickets: others.map(({ ticket, stage }) => ({ id: ticket.id, stage, last: ticket.reports.at(-1)?.kind })),
       }))
       return
     }
@@ -27,9 +37,9 @@ export const startPanel = async (deps: { kv: KV }, opts: { port?: number } = {})
     response.end(`<html><body>
 <h1>dsh-superagent</h1>
 <h2>待人工 Attention</h2>
-${attention.map(t => `<p><b>${escapeHtml(t.id)}</b> — ${escapeHtml(t.reports.at(-1)!.text)}</p>`).join('\n') || '<p>无</p>'}
+${attention.map(({ ticket, stage }) => `<p><b>${escapeHtml(ticket.id)}</b> [${stage}] — ${escapeHtml(waitingText(ticket))}</p>`).join('\n') || '<p>无</p>'}
 <h2>工单 Tickets</h2>
-${others.map(t => `<p>${escapeHtml(t.id)} — ${t.status} — ${t.reports.at(-1)?.kind ?? 'no reports'}</p>`).join('\n') || '<p>无</p>'}
+${others.map(({ ticket, stage }) => `<p>${escapeHtml(ticket.id)} — ${stage} — ${ticket.reports.at(-1)?.kind ?? 'no reports'}</p>`).join('\n') || '<p>无</p>'}
 </body></html>`)
   })
   await new Promise<void>(resolve => server.listen(opts.port ?? 4096, '127.0.0.1', resolve))

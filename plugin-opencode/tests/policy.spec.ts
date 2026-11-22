@@ -27,6 +27,7 @@ const ticket = (over: Partial<Ticket> = {}): Ticket => ({
   status: 'open',
   subscriptions: [],
   reports: [],
+  assignmentIds: [],
   ...over,
 })
 

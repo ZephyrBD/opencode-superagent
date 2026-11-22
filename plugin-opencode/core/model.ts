@@ -42,6 +42,11 @@ export const TicketSchema = z.object({
   directory: z.string().optional(),
   subscriptions: z.array(z.string()),
   reports: z.array(ReportSchema),
+  assignmentIds: z.array(z.string()).optional(),
+  /** Delivering an input to the worker failed and is being retried. */
+  deliveryFailed: z.boolean().optional(),
+  /** A structured question that waits for a person's answer. */
+  attention: z.object({ question: z.string(), at: z.number().int() }).optional(),
 }).strict()
 export type Ticket = z.infer<typeof TicketSchema>
 

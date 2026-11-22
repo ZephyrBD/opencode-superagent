@@ -44,7 +44,7 @@ describe('assemble', () => {
     expect(registered.map(t => t.name)).toContain('superagent_report_ticket')
     const tool = registered.find(t => t.name === 'superagent_report_ticket')!
     await expect(tool.execute({ ticket: 'nope', kind: 'ready', text: 'x' })).rejects.toThrow('unknown ticket')
-    const ticket = { id: 'tkt_1', mandateId: 'man_1', status: 'open', subscriptions: [], reports: [] }
+    const ticket = { id: 'tkt_1', mandateId: 'man_1', status: 'open', subscriptions: [], reports: [], assignmentIds: [] }
     await deps.kv.set('ticket/tkt_1', ticket)
     await tool.execute({ ticket: 'tkt_1', kind: 'ready', text: 'done' })
     const stored = await deps.kv.get<{ status: string; outcome?: string }>('ticket/tkt_1')
@@ -79,7 +79,7 @@ describe('assemble', () => {
     const deps = baseDeps()
     const { editor } = fakeToolRegistry()
     const app = assemble({ ...deps, token: 'tok', tools: editor })
-    const ticket = { id: 'tkt_1', mandateId: 'man_1', status: 'open', subscriptions: [], reports: [] }
+    const ticket = { id: 'tkt_1', mandateId: 'man_1', status: 'open', subscriptions: [], reports: [], assignmentIds: [] }
     await deps.kv.set('ticket/tkt_1', ticket)
     await app.executor.dispatch(ticket as never, ['first'])
     // Fan-out: a later trigger on the thread reaches the live worker.
@@ -103,6 +103,26 @@ describe('assemble', () => {
     await expect(tool.execute({ ticket: 'tkt_1', kind: 'ready', text: 'x' }, { sessionID: 'sess_other' })).rejects.toThrow('not this ticket')
     await tool.execute({ ticket: 'tkt_1', kind: 'ready', text: 'x' }, { sessionID: 'sess_worker-tkt_1' })
     expect(app.engine).toBeDefined()
+  })
+
+  it('sends recovery notes to open tickets with running assignments on start, oldest first', async () => {
+    const deps = baseDeps()
+    const { editor } = fakeToolRegistry()
+    const makeTicket = (id: string) => ({
+      id, mandateId: 'man_1', status: 'open', subscriptions: [], reports: [], assignmentIds: [`asg_${id}`], sessionId: `sess_worker-${id}`,
+    })
+    await deps.kv.set('ticket/tkt_2', makeTicket('tkt_2'))
+    await deps.kv.set('ticket/tkt_1', makeTicket('tkt_1'))
+    await deps.kv.set('assignment/asg_tkt_1', { id: 'asg_tkt_1', ticketId: 'tkt_1', status: 'running', startedAt: 1 })
+    await deps.kv.set('assignment/asg_tkt_2', { id: 'asg_tkt_2', ticketId: 'tkt_2', status: 'running', startedAt: 2 })
+    const app = assemble({ ...deps, token: 'tok', tools: editor })
+    await app.start()
+    const creates = deps.order.filter(entry => entry.startsWith('create:'))
+    expect(creates.indexOf('create:worker-tkt_1')).toBeLessThan(creates.indexOf('create:worker-tkt_2'))
+    const asg1 = await deps.kv.get<{ status: string; endReason?: string }>('assignment/asg_tkt_1')
+    expect(asg1).toMatchObject({ status: 'ended', endReason: 'host restarted' })
+    const note = deps.sessions.prompts.find(p => p.text.includes('Ticket tkt_1') && p.text.includes('restart'))!
+    expect(note.text).toContain('git')
   })
 
   it('retries pending triggers left over from an unavailable eval on start', async () => {
