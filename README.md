@@ -29,6 +29,14 @@ GitHub/飞书 Source 与 Channel、模型研判层（inferred）、Outbox 回执
 
 ## 安装
 
+对你的编码 Agent 说：
+
+```text
+阅读本仓库的 SETUP.md，带我安装 opencode-superagent-lite。
+```
+
+也可以手动安装：
+
 ```bash
 git clone https://github.com/ZephyrBD/opencode-superagent.git
 cd opencode-superagent && git switch lite
