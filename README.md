@@ -1,39 +1,62 @@
-# dsh-superagent
+# opencode-superagent
 
-> **Research prototype for reference only, not an official DeepSeek product.** This code grew out of our team's day-to-day development work, with much of the engineering done by coding agents. Treat it as research code, not production-ready software. It may still contain bugs, and its coding style and engineering practices may be inconsistent. Review and adapt it before using it in your own environment.
->
-> We have adapted it for publication, so it is not identical to our internal version or the implementation described in *Exploring Super-agent Design: Towards a More Autonomous Agent System*. Some designs discussed in the article are directions for future development and are not implemented in this prototype.
+一个 OpenCode 插件：为你的 GitHub 仓库配一个常驻的编码智能体团队伙伴。它改编自 DeepSeek Harness 的 [dsh-superagent 原型](https://github.com/ZephyrBD/superagent-prototype-for-opencode/blob/vanilla/README.md)，保留其领域模型与哲学：
 
-dsh-superagent is a proactive coding agent for one GitHub repository, packaged as a bundle for [DeepSeek Harness](https://www.deepseek.com/en/harness/). It listens to GitHub and, optionally, Feishu. When someone allowed asks the agent for work, it opens a work item, works on it in its own agent session and directory, and answers in the original conversation, for example with a pull request. A web panel shows what needs a person.
+> **尽可能少占用人的注意力，尽可能多地给出价值。**
 
-It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
+它只在被请求时、或团队的书面规则允许时行动；只在人必须行动、或能使用结果时说话。
 
-## Setup
+## 它做什么
 
-Setup has many steps, so an agent does it with you. Ask your coding agent:
+- **Source**（GitHub Notifications 轮询）把 Issue/PR 的评论变成 Trigger
+- **Eval** 两层判断：确定性的 gate（谁可以派活）+ 模型研判（这是不是要干活）
+- 接单后创建 **Ticket + Mandate**（记录策略版本、范围、强度——授权与上下文分离，可审计）
+- **Executor** 为每个工单开一个 worker session 和独立的 git worktree，worker 用结构化 Report 汇报（progress / waiting / ready / blocked / failed / dropped）
+- 同一线程的后续讨论自动到达执行者，不需要再次 @
+- 一个迷你面板（`http://127.0.0.1:4096`）只列出"等待人"的工单
 
-> Read SETUP.md in this repository and set up dsh-superagent with me.
+## 安装
 
-It asks one short question at a time, shows the full plan once, and then installs and configures everything. [SETUP.md](SETUP.md) is what it follows.
+```bash
+# 一条命令安装（OpenCode 会拉取本仓库并加载插件）
+opencode plugin add github:ZephyrBD/superagent-prototype-for-opencode#main
 
-## Documentation
+# 常驻运行（插件挂在 serve 进程里）
+opencode serve
 
-Read the numbered documents in order; each builds only on the ones before it.
+# 或者：克隆后以本地路径注册
+# git clone https://github.com/ZephyrBD/superagent-prototype-for-opencode && pnpm install
+# opencode.json: { "plugins": ["<本仓库路径>"] }
+```
 
-- [000 Philosophy](docs/000-philosophy.md)
-- [001 Domain model](docs/001-domain.md)
-- [002 Authorization](docs/002-authorization.md)
-- [003 Execution](docs/003-execution.md)
-- [004 Prompts](docs/004-prompts.md)
-- [005 Panel](docs/005-panel.md)
-- [006 Deployment](docs/006-deployment.md): manual setup, configuration, upgrades and troubleshooting
-- [007 Architecture](docs/007-architecture.md)
-- [008 Cookbook](docs/008-cookbook.md): adding a Source
+## 最低配置
 
-## Development
+通过 `opencode.json` 的插件 options 或环境变量：
 
-`pnpm check` runs the typecheck, the tests and the build.
+- `GITHUB_TOKEN` — 有该仓库 Notifications 读取与评论权限
+- `repository` — 监听的仓库，`owner/name`
+- `allowedActors` — 允许派活的人的 GitHub 登录名，默认为空
 
-## License
+## Operator 责任
 
-[MIT](LICENSE)
+智能体以你的账号评论、开 PR、发消息，每一条都花同事的注意力，你要对它说的话负责：
+
+- **Start narrow**：从短的 allowed list 开始，proactive 只记录不执行；看到它"本来会做的事"合理后再放宽。
+- **调向更少噪音**：它吵了，就把 prompt 改短改严，或暂停它。不要用更多消息去解释噪音。
+- **不要用它产出数量**：批量 PR、广播消息的代价大于价值。
+- **对它说的话负责**：读它以你名义发的内容，错了就在 prompt 里纠正。
+
+## Source
+
+- **GitHub**：Notifications 轮询 + open PR 跟随（分支名末段 = 工单 ID），PR 关闭/合并驱动工单收尾
+- **飞书（可选）**：通过 `lark-cli` 的 `pull/reply` 子命令轮询；配置 `feishu.chats`（每聊天 `mentions`/`all`）后启用；回复按 key 幂等，已删除会话的消息永久丢弃
+
+## 词汇表
+
+Trigger/触发、Thread/线程、Eval/评估、Mandate/授权、Ticket/工单、Subscription/订阅——完整定义见 [原型文档 001-domain](https://github.com/ZephyrBD/superagent-prototype-for-opencode/blob/vanilla/docs/001-domain.md)。
+
+## 行为规范文件
+
+- [prompts/assessor.md](prompts/assessor.md) — Eval 研判的行为规范
+- [prompts/worker.md](prompts/worker.md) — worker session 的行为规范
+- [prompts/shared.md](prompts/shared.md) — 所有 session 共享的原则
