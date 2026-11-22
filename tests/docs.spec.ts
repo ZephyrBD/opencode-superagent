@@ -10,7 +10,7 @@ describe('plugin README', () => {
   const readme = read('README.md')
 
   it('explains the plugin registration and the serving model', () => {
-    expect(readme).toContain('opencode plugin add')
+    expect(readme).toContain('git clone https://github.com/ZephyrBD/superagent-prototype-for-opencode.git')
     expect(readme).toContain('"plugins"')
     expect(readme).toContain('opencode serve')
   })
