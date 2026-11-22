@@ -55,6 +55,26 @@ describe('executor', () => {
     expect(sessions.prompts[0]!.text).toContain('Never enable auto-merge')
   })
 
+  it('clears attention through KV even when the ticket is not in the live map', async () => {
+    const kv = MemoryKV()
+    await kv.set('ticket/tkt_h', { id: 'tkt_h', mandateId: 'man_1', status: 'open', sessionId: 'sess_h', subscriptions: [], reports: [{ kind: 'blocked', text: 'waiting', at: 1 }], attention: { question: 'which plan', at: 1 } })
+    const executor = new Executor({ sessions: fakeSessions(), worktrees: fakeWorktrees(), kv, limit: 2 })
+    await executor.rebuild()
+    executor.onPersonMessage('tkt_h')
+    const stored = await kv.get<{ attention?: unknown }>('ticket/tkt_h')
+    expect(stored?.attention).toBeUndefined()
+  })
+
+  it('does not deliver twice for the same delivery key', async () => {
+    const sessions = fakeSessions()
+    const executor = new Executor({ sessions, worktrees: fakeWorktrees(), kv: MemoryKV(), limit: 2 })
+    const t = ticket()
+    await executor.dispatch(t, ['x'])
+    await executor.deliver(t.id, 'once only', 'trg_1')
+    await executor.deliver(t.id, 'once only', 'trg_1')
+    expect(sessions.prompts.filter(p => p.text === 'once only')).toHaveLength(1)
+  })
+
   it('re-delivers unread inputs on a new assignment and stops after a report confirms them', async () => {
     const kv = MemoryKV()
     const sessions = fakeSessions()

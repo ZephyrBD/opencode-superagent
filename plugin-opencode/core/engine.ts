@@ -23,7 +23,7 @@ export interface EngineDeps {
   policy: Policy
   assessor: Assessor
   clock: () => number
-  notify(event: { type: 'fanout'; ticketId: string; trigger: Trigger } | { type: 'decision'; decision: Decision; threadKey: string } | { type: 'notice'; ticketId: string; text: string }): void
+  notify(event: { type: 'dispatch'; ticketId: string; inputs: string[] } | { type: 'fanout'; ticketId: string; trigger: Trigger } | { type: 'decision'; decision: Decision; threadKey: string } | { type: 'notice'; ticketId: string; text: string }): void
 }
 
 const threadKeyOf = (key: string) => `thread/${key}`
@@ -91,20 +91,25 @@ export class Engine {
     if (this.policy.paused) return await this.record(thread, trigger, 'recorded')
     // A person's message on a live ticket's thread reaches it without an eval — unless the
     // assessor hands it back, in which case it becomes a new-work candidate like any other.
-    const liveTarget = live[0]
+    const liveTarget = live.at(-1)
     if (liveTarget && this.assessor.classifyFollowUp) {
       const { inScope } = await this.assessor.classifyFollowUp({ trigger, thread })
       if (!inScope) {
         thread.triggers.push(trigger)
-        const verdictFor = gate(this.policy, trigger, tickets.filter((t): t is Ticket => t !== undefined))
-        if (verdictFor.admissible && !verdictFor.recordOnly) {
-          const decision = await this.assess(thread, tickets.filter((t): t is Ticket => t !== undefined))
-          if (decision.kind === 'accept') {
-            const newTicket = await this.openTicket(trigger, decision, verdictFor.strength)
-            thread.ticketIds.push(newTicket.id)
-            await this.kv.set(threadKeyOf(thread.key), thread)
-            return await this.record(thread, trigger, 'evaluated')
-          }
+        const decision = await this.assess(thread, tickets.filter((t): t is Ticket => t !== undefined))
+        if (decision.kind === 'accept') {
+          const newTicket = await this.openTicket(trigger, decision, 'explicit')
+          thread.ticketIds.push(newTicket.id)
+          await this.kv.set(threadKeyOf(thread.key), thread)
+          this.notify({ type: 'dispatch', ticketId: newTicket.id, inputs: [trigger.text] })
+          return await this.record(thread, trigger, 'evaluated')
+        }
+        if (decision.kind === 'unavailable') {
+          await this.kv.set(threadKeyOf(thread.key), thread)
+          const queued = (await this.kv.get<Trigger[]>(pendingKeyOf(trigger.threadKey))) ?? []
+          queued.push(trigger)
+          await this.kv.set(pendingKeyOf(trigger.threadKey), queued)
+          return await this.record(thread, trigger, 'evaluated')
         }
         await this.kv.set(threadKeyOf(thread.key), thread)
         return await this.record(thread, trigger, 'filtered')
@@ -112,7 +117,7 @@ export class Engine {
     }
     const resumable = !trigger.actor.bot && (live.length > 0 || ended.find(t => t.outcome !== 'stopped'))
     if (resumable) {
-      const target = live[0] ?? ended.find(t => t.outcome !== 'stopped')!
+      const target = live.at(-1) ?? ended.find(t => t.outcome !== 'stopped')!
       if (target.status === 'ended') {
         const mandate = await this.kv.get<Mandate>(mandateKeyOf(target.mandateId))
         if (!mandate || !revalidate(this.policy, mandate)) return await this.record(thread, trigger, 'filtered')
@@ -131,7 +136,6 @@ export class Engine {
     }
 
     const verdict = gate(this.policy, trigger, tickets.filter((t): t is Ticket => t !== undefined))
-    if (this.policy.paused) return await this.record(thread, trigger, 'recorded')
     if (!verdict.admissible) return await this.record(thread, trigger, 'filtered')
     if (verdict.recordOnly) return await this.record(thread, trigger, 'recorded')
 
@@ -141,6 +145,7 @@ export class Engine {
       const ticket = await this.openTicket(trigger, decision, verdict.strength)
       thread.ticketIds.push(ticket.id)
       await this.kv.set(threadKeyOf(thread.key), thread)
+      this.notify({ type: 'dispatch', ticketId: ticket.id, inputs: [trigger.text] })
       return await this.record(thread, trigger, 'evaluated')
     }
     if (decision.kind === 'unavailable') {
@@ -191,6 +196,10 @@ export class Engine {
     const ticket = await this.kv.get<Ticket>(ticketKeyOf(ticketId))
     if (!ticket) throw new Error(`unknown ticket ${ticketId}`)
     ticket.reports.push(report)
+    if (report.kind === 'ready' && ticket.closedWithoutMerge) {
+      ticket.status = 'ended'
+      ticket.outcome = 'dropped'
+    }
     await this.kv.set(ticketKeyOf(ticketId), ticket)
   }
 
@@ -205,6 +214,8 @@ export class Engine {
     await this.kv.set(`pr/${ticketId}`, followed)
     const ticket = await this.kv.get<Ticket>(ticketKeyOf(ticketId))
     if (!ticket || ticket.status !== 'open') return
+    if (!merged) ticket.closedWithoutMerge = true
+    await this.kv.set(ticketKeyOf(ticketId), ticket)
     if (followed.some(pr => pr.open)) return
     const last = ticket.reports.at(-1)
     if (last?.kind !== 'ready') return

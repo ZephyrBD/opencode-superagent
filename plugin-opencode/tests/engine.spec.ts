@@ -183,6 +183,60 @@ describe('engine ticket lifecycle', () => {
     expect((await engine.tickets()).find(t => t.id === ticket.id)).toMatchObject({ status: 'ended', outcome: 'stopped' })
   })
 
+  it('dispatches a new ticket through the notify port when accepted', async () => {
+    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 'fix it' })])
+    const { engine, events } = setup(assessor)
+    await engine.intake(trigger())
+    expect(events).toContainEqual(expect.objectContaining({ type: 'dispatch', ticketId: expect.any(String) }))
+  })
+
+  it('queues an out-of-scope follow-up when its eval is unavailable instead of losing it', async () => {
+    const assessor = fakeAssessor([
+      () => ({ kind: 'accept', scope: 's' }),
+      () => ({ kind: 'unavailable' }),
+      () => ({ kind: 'accept', scope: 'the other work' }),
+    ])
+    const scoped = assessor as typeof assessor & {
+      classifyFollowUp?: (input: { trigger: Trigger; thread: ThreadState }) => Promise<{ inScope: boolean }>
+    }
+    scoped.classifyFollowUp = async ({ trigger: t }) => ({ inScope: t.id === 'trg_1' })
+    const { engine } = setup(scoped)
+    await engine.intake(trigger())
+    expect(await engine.intake(trigger({ id: 'trg_5' }))).toBe('evaluated')
+    expect((await engine.tickets())).toHaveLength(1)
+    await engine.retryPending('github:a/b:1')
+    expect((await engine.tickets())).toHaveLength(2)
+  })
+
+  it('routes follow-ups to the newest live ticket on the thread', async () => {
+    const assessor = fakeAssessor([
+      () => ({ kind: 'accept', scope: 'first' }),
+      () => ({ kind: 'accept', scope: 'second' }),
+    ])
+    const scoped = assessor as typeof assessor & {
+      classifyFollowUp?: (input: { trigger: Trigger; thread: ThreadState }) => Promise<{ inScope: boolean }>
+    }
+    scoped.classifyFollowUp = async ({ trigger: t }) => ({ inScope: t.id !== 'trg_5' })
+    const { engine, events } = setup(scoped)
+    await engine.intake(trigger())
+    await engine.intake(trigger({ id: 'trg_5', text: 'different work' }))
+    const tickets = await engine.tickets()
+    await engine.intake(trigger({ id: 'trg_9', text: 'a correction' }))
+    const fanout = events.filter(e => (e as { type: string }).type === 'fanout').at(-1) as { ticketId: string }
+    expect(fanout.ticketId).toBe(tickets.at(-1)!.id)
+  })
+
+  it('ends a ticket as dropped when a ready report follows an unmerged PR close', async () => {
+    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
+    const { engine } = setup(assessor)
+    await engine.intake(trigger())
+    const ticket = (await engine.tickets())[0]!
+    await engine.followPr(ticket.id, 9)
+    await engine.prClosed(ticket.id, 9, false)
+    await engine.reportExternal(ticket.id, { kind: 'ready', text: 'done', at: 3 })
+    expect((await engine.tickets())[0]).toMatchObject({ status: 'ended', outcome: 'dropped' })
+  })
+
   it('stop marks the outcome and ends the ticket', async () => {
     const { engine, ticket } = await accepted()
     await engine.stop(ticket.id)

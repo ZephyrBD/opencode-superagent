@@ -55,6 +55,18 @@ describe('outbox', () => {
     expect(new Set(sent.map(p => (p as { n: number }).n)).size).toBe(3)
   })
 
+  it('rebuilds problem flags from durable records on recover', async () => {
+    const kv = MemoryKV()
+    await kv.set('outbox/000001', { kind: 'reply', payload: { a: 1 }, attempts: 3 })
+    const outbox = new Outbox({
+      kv, clock: () => 0,
+      delay: async () => {},
+      send: async () => { throw new Error('still down') },
+    })
+    await outbox.recover()
+    expect(outbox.problems()).toHaveLength(1)
+  })
+
   it('replays records left over from a crash on recover', async () => {
     const kv = MemoryKV()
     await kv.set('outbox/000001', { kind: 'reply', payload: { n: 1 } })

@@ -38,6 +38,8 @@ export const TicketSchema = z.object({
   mandateId: z.string().min(1),
   status: z.enum(['open', 'ended']),
   outcome: z.enum(['completed', 'dropped', 'stopped']).optional(),
+  /** A followed pull request closed without merge; a later ready report ends the ticket as dropped. */
+  closedWithoutMerge: z.boolean().optional(),
   sessionId: z.string().optional(),
   directory: z.string().optional(),
   subscriptions: z.array(z.string()),

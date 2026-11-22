@@ -144,15 +144,18 @@ export class Executor {
   }
 
   /** Delivers a new input to a live worker. Refuses while the ticket is held after blocked/failed. */
-  async deliver(ticketId: string, text: string): Promise<void> {
+  async deliver(ticketId: string, text: string, key?: string): Promise<void> {
     if (this.held.has(ticketId)) throw new Error(`ticket ${ticketId} is held: waiting for a person`)
     const ticket = await this.load(ticketId)
     if (!ticket?.sessionId) throw new Error(`ticket ${ticketId} has no live worker`)
+    // A replayed delivery (outbox recover) must not prompt the worker twice.
+    if (key && (await this.kv.get(`delivered/${key}`))) return
     // A person's message may use the emergency slot when normal slots are full.
     await this.emergency.take()
     try {
       await this.recordInput(ticket.sessionId, text)
       await this.sessions.prompt(ticket.sessionId, text)
+      if (key) await this.kv.set(`delivered/${key}`, { at: Date.now() })
     } finally {
       this.emergency.release()
     }
@@ -184,7 +187,7 @@ export class Executor {
     ticket.reports.push(report)
     if (report.kind === 'ready') {
       ticket.status = 'ended'
-      ticket.outcome = 'completed'
+      ticket.outcome = ticket.closedWithoutMerge ? 'dropped' : 'completed'
     }
     if (report.kind === 'dropped') {
       ticket.status = 'ended'
@@ -214,7 +217,13 @@ export class Executor {
     if (ticket) {
       ticket.attention = undefined
       void this.save(ticket)
+      return
     }
+    void this.kv.get<Ticket>(`ticket/${ticketId}`).then(stored => {
+      if (stored?.attention === undefined) return
+      stored.attention = undefined
+      return this.kv.set(`ticket/${ticketId}`, stored)
+    }).catch(() => {})
   }
 
   private brief(ticket: Ticket, inputs: string[], recovery = false): string {

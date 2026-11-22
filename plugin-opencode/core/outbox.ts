@@ -69,6 +69,10 @@ export class Outbox {
 
   async recover(): Promise<void> {
     const rows = (await this.kv.scan('outbox/')).sort((a, b) => a.key.localeCompare(b.key))
+    for (const row of rows) {
+      const record = row.value as Record
+      if (record.attempts >= 3) this.failed.add(row.key)
+    }
     for (const row of rows) await this.deliver(row.key)
   }
 }

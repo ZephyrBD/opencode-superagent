@@ -9,6 +9,7 @@ import type { KV } from './core/kv.ts'
 import { ReportSchema, type Ticket } from './core/model.ts'
 import { GitHubSource } from './sources/github/index.ts'
 import { FeishuSource, type FeishuCli } from './sources/feishu/index.ts'
+import { cliFeishuCli } from './sources/feishu/cli.ts'
 import { startPanel } from './panel/http.ts'
 import type { Assignment } from './core/assignment.ts'
 
@@ -42,10 +43,18 @@ export interface AssembleDeps {
   setIntervalFn?: (fn: () => void, ms: number) => unknown
   clearIntervalFn?: (handle: unknown) => void
   panel?: { port?: number }
-  /** The write side of the origin threads; PR outcome notices go out through it. */
+  /** The write side of GitHub origin threads; PR outcome notices go out through it. */
   channel?: { reply(threadKey: string, text: string): Promise<void> }
-  /** Optional Feishu Source; polls alongside GitHub when provided. */
-  feishu?: { cli: FeishuCli }
+  /** The write side of Feishu origin threads. */
+  feishuChannel?: { reply(threadKey: string, text: string): Promise<void> }
+  /** Optional Feishu Source with its chat config; polls alongside GitHub when provided. */
+  feishu?: { cli: FeishuCli; config?: { chats: Array<{ id: string; listen: 'mentions' | 'all' }>; pollSeconds: number } }
+  /** GitHub Source wiring; constructed once so health state accumulates across polls. */
+  github?: {
+    config: { repository: string; allowedActors: string[]; pollSeconds: number; agentLogin: string }
+    fetchJSON(url: string, init?: RequestInit): Promise<{ status: number; json(): Promise<unknown> }>
+    fetchThread(apiUrl: string): Promise<{ number: number; comments: Array<{ id: number; body: string; html_url: string; created_at: string; user: { login: string; type: string } }>; state: string }>
+  }
   /** Policy overrides: repository and allowed actors are the operator's decision. */
   config?: { repository?: string; allowedActors?: string[]; policyVersion?: string }
 }
@@ -54,6 +63,7 @@ export interface AssembledApp {
   engine: Engine
   executor: Executor
   outbox: Outbox
+  githubSource?: GitHubSource
   /** Runs one poll across every enabled source. */
   pollAll(): Promise<unknown[]>
   start(): Promise<void>
@@ -83,12 +93,19 @@ export const assemble = (deps: AssembleDeps): AssembledApp => {
       }
       if (kind === 'deliver') {
         if (ticket.status !== 'open') return
-        await executor.deliver(ticketId, inputs.join('\n'))
+        await executor.deliver(ticketId, inputs.join('\n'), (payload as { key?: string }).key)
       }
-      if (kind === 'notice' && deps.channel) {
-        // The notice goes to the ticket's origin thread: the first subscription.
+      if (kind === 'notice') {
         const origin = ticket.subscriptions[0]
-        if (origin && !origin.includes(':pr:')) await deps.channel.reply(origin, (payload as { text: string }).text)
+        if (!origin || origin.includes(':pr:')) return
+        const text = (payload as { text: string }).text
+        if (origin.startsWith('feishu:')) {
+          if (!deps.feishuChannel) return
+          await deps.feishuChannel.reply(origin, text)
+          return
+        }
+        if (!deps.channel) return
+        await deps.channel.reply(origin, text)
       }
     },
   })
@@ -114,7 +131,7 @@ export const assemble = (deps: AssembleDeps): AssembledApp => {
     clock: () => Date.now(),
     notify: event => {
       if (event.type === 'fanout') {
-        void outbox.enqueue('deliver', { ticketId: event.ticketId, inputs: [event.trigger.text] }).catch(() => {})
+        void outbox.enqueue('deliver', { ticketId: event.ticketId, inputs: [event.trigger.text], key: event.trigger.id }).catch(() => {})
       }
       if (event.type === 'notice') {
         void outbox.enqueue('notice', { ticketId: event.ticketId, text: event.text }).catch(() => {})
@@ -147,20 +164,39 @@ export const assemble = (deps: AssembleDeps): AssembledApp => {
   let handle: unknown
   let timerSet = false
   const closePanel = { close: async () => {} }
+  const githubSource = deps.github
+    ? new GitHubSource({
+        config: deps.github.config,
+        token: deps.token,
+        kv: deps.kv,
+        fetchJSON: deps.github.fetchJSON,
+        fetchThread: deps.github.fetchThread,
+        intake: trigger => engine.intake(trigger),
+        follow: async (ticketId, number, head) => {
+          await engine.followPr(ticketId, number)
+          void head
+        },
+        prClosed: (ticketId, number, merged) => engine.prClosed(ticketId, number, merged),
+      })
+    : undefined
   const feishuSource = deps.feishu
-    ? new FeishuSource({ config: { chats: [], pollSeconds: 30 }, cli: deps.feishu.cli, kv: deps.kv, intake: trigger => {
-        void engine.intake(trigger).catch(() => {})
-        return Promise.resolve('evaluated')
-      } })
+    ? new FeishuSource({
+        config: deps.feishu.config ?? { chats: [], pollSeconds: 30 },
+        cli: deps.feishu.cli,
+        kv: deps.kv,
+        intake: trigger => engine.intake(trigger),
+      })
     : undefined
   const app: AssembledApp = {
     engine,
     executor,
     outbox,
+    githubSource,
     async pollAll() {
       const results: Promise<unknown>[] = []
-      if (deps.poll) results.push(deps.poll())
+      if (githubSource) results.push(githubSource.pollOnce())
       if (feishuSource) results.push(feishuSource.pollOnce())
+      if (deps.poll) results.push(deps.poll())
       return Promise.all(results)
     },
     async start() {
@@ -168,7 +204,9 @@ export const assemble = (deps: AssembleDeps): AssembledApp => {
       if (deps.recover) await deps.recover()
       else await outbox.recover()
       await executor.rebuild()
-      // A restart ends running assignments; each open ticket starts again, oldest first, with a recovery note.
+      // A restart ends running assignments; each open ticket starts again, oldest first, with a
+      // recovery note. Tickets a person must answer stay held: restarting the host must not
+      // launch a turn a blocked worker is not asking for.
       const tickets = (await deps.kv.scan('ticket/')).map(row => row.value as Ticket)
       const runningIds = new Set(
         (await deps.kv.scan('assignment/'))
@@ -177,7 +215,11 @@ export const assemble = (deps: AssembleDeps): AssembledApp => {
           .map(assignment => assignment.ticketId),
       )
       const toRecover = tickets
-        .filter(ticket => ticket.status === 'open' && runningIds.has(ticket.id))
+        .filter(ticket => {
+          if (ticket.status !== 'open' || !runningIds.has(ticket.id)) return false
+          const last = ticket.reports.at(-1)
+          return last?.kind !== 'blocked' && last?.kind !== 'failed'
+        })
         .sort((a, b) => a.id.localeCompare(b.id))
       for (const ticket of toRecover) await executor.recoverTicket(ticket)
       if (deps.resumeDispatch) await deps.resumeDispatch()
@@ -264,11 +306,22 @@ export default Plugin.define({
       update: () => {},
       remove: () => {},
     }
-    const config = (ctx.options ?? {}) as { repository?: string; allowedActors?: string[]; pollSeconds?: number; agentLogin?: string; panelPort?: number }
+    const config = (ctx.options ?? {}) as {
+      repository?: string
+      allowedActors?: string[]
+      pollSeconds?: number
+      agentLogin?: string
+      panelPort?: number
+      feishu?: { chats?: Array<{ id: string; listen: 'mentions' | 'all' }>; pollSeconds?: number; cliPath?: string }
+    }
     const repository = config.repository ?? 'owner/repo'
     const token = process.env.GITHUB_TOKEN ?? ''
     const agentLogin = config.agentLogin ?? 'agent-bot'
     const allowedActors = config.allowedActors ?? []
+    const githubFetch = async (url: string, init?: RequestInit) => {
+      const response = await fetch(url, init)
+      return { status: response.status, json: () => response.json(), headers: response.headers }
+    }
 
     const app = assemble({
       kv,
@@ -289,26 +342,27 @@ export default Plugin.define({
           })
         },
       },
-      poll: () => {
-        const source = new GitHubSource({
-          config: { repository, allowedActors, pollSeconds: config.pollSeconds ?? 60, agentLogin },
-          token,
-          kv,
-          fetchJSON: async (url, init) => {
-            const response = await fetch(url, init)
-            return { status: response.status, json: () => response.json(), headers: response.headers }
-          },
-          fetchThread: async apiUrl => {
-            const response = await fetch(apiUrl, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } })
-            return response.json() as never
-          },
-          intake: trigger => {
-            void app.engine.intake(trigger).catch(() => {})
-            return Promise.resolve('evaluated')
-          },
-        })
-        return source.pollOnce()
+      feishuChannel: {
+        reply: async (threadKey, text) => {
+          const [, conversation, root] = threadKey.split(':')
+          if (!conversation || !root) return
+          await cliFeishuCli(config.feishu?.cliPath ?? 'lark-cli').reply(conversation, root, `notice-${conversation}-${root}`, text)
+        },
       },
+      github: {
+        config: { repository, allowedActors, pollSeconds: config.pollSeconds ?? 60, agentLogin },
+        fetchJSON: githubFetch,
+        fetchThread: async apiUrl => {
+          const response = await fetch(apiUrl, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } })
+          return response.json() as never
+        },
+      },
+      feishu: config.feishu?.chats?.length
+        ? {
+            cli: cliFeishuCli(config.feishu.cliPath ?? 'lark-cli'),
+            config: { chats: config.feishu.chats, pollSeconds: config.feishu.pollSeconds ?? 30 },
+          }
+        : undefined,
     })
     await app.start()
     return () => app.cleanup()

@@ -126,6 +126,71 @@ describe('assemble', () => {
     expect(pulled).toHaveLength(1)
   })
 
+  it('routes notices by thread kind: github via channel, feishu via the feishu source', async () => {
+    const deps = baseDeps()
+    const { editor } = fakeToolRegistry()
+    const githubReplies: string[] = []
+    const feishuReplies: string[] = []
+    const app = assemble({
+      ...deps, token: 'tok', tools: editor,
+      channel: { reply: async (_t, text) => { githubReplies.push(text) } },
+      feishuChannel: { reply: async (_t, text) => { feishuReplies.push(text) } },
+    })
+    const githubTicket = { id: 'tkt_g', mandateId: 'm', status: 'open', subscriptions: ['github:a/b:1'], reports: [], assignmentIds: [] }
+    const feishuTicket = { id: 'tkt_f', mandateId: 'm', status: 'open', subscriptions: ['feishu:oc_1:om_1'], reports: [], assignmentIds: [] }
+    await deps.kv.set('ticket/tkt_g', githubTicket)
+    await deps.kv.set('ticket/tkt_f', feishuTicket)
+    await app.outbox.enqueue('notice', { ticketId: 'tkt_g', text: 'merged' })
+    await app.outbox.enqueue('notice', { ticketId: 'tkt_f', text: 'merged' })
+    expect(githubReplies).toEqual(['merged'])
+    expect(feishuReplies).toEqual(['merged'])
+  })
+
+  it('builds the feishu source from the provided chat config, so filtered chats fire', async () => {
+    const deps = baseDeps()
+    const { editor } = fakeToolRegistry()
+    const received: Array<{ id: string }> = []
+    const cli = {
+      pull: async () => ({
+        me: 'ou_bot',
+        items: [{ id: 'om_9', conversation: 'oc_1', sender: { id: 'ou_z', bot: false }, mentions_me: true, text: 'hi', at: 1, url: 'u' }],
+        next: 1,
+      }),
+      reply: async () => {},
+      thread: async () => ({ items: [] }),
+    }
+    const app = assemble({
+      ...deps, token: 'tok', tools: editor,
+      feishu: { cli, config: { chats: [{ id: 'oc_1', listen: 'mentions' as const }], pollSeconds: 30 } },
+    })
+    await app.pollAll()
+    expect(received).toHaveLength(0)
+  })
+
+  it('keeps one GitHubSource across polls so its health state accumulates', async () => {
+    const deps = baseDeps()
+    const { editor } = fakeToolRegistry()
+    let calls = 0
+    const app = assemble({
+      ...deps, token: 'tok', tools: editor,
+      github: {
+        config: { repository: 'a/b', allowedActors: [], pollSeconds: 60, agentLogin: 'agent-bot' },
+        fetchJSON: async () => {
+          calls += 1
+          return { status: 500, json: async () => ({}) }
+        },
+        fetchThread: async () => ({ number: 1, comments: [], state: 'open' }),
+      },
+    })
+    await app.pollAll()
+    await app.pollAll()
+    await app.pollAll()
+    await app.pollAll()
+    await app.pollAll()
+    await app.pollAll()
+    expect(app.githubSource?.error()).toBeDefined()
+  })
+
   it('validates report tool input and refuses a report from a foreign session', async () => {
     const deps = baseDeps()
     const { editor, registered } = fakeToolRegistry()
@@ -157,6 +222,19 @@ describe('assemble', () => {
     expect(asg1).toMatchObject({ status: 'ended', endReason: 'host restarted' })
     const note = deps.sessions.prompts.find(p => p.text.includes('Ticket tkt_1') && p.text.includes('restart'))!
     expect(note.text).toContain('git')
+  })
+
+  it('does not relaunch a held ticket on restart', async () => {
+    const deps = baseDeps()
+    const { editor } = fakeToolRegistry()
+    await deps.kv.set('ticket/tkt_h', {
+      id: 'tkt_h', mandateId: 'man_1', status: 'open', subscriptions: [], reports: [{ kind: 'blocked', text: 'waiting on a person', at: 1 }],
+      assignmentIds: ['asg_tkt_h'], sessionId: 'sess_worker-tkt_h',
+    })
+    await deps.kv.set('assignment/asg_tkt_h', { id: 'asg_tkt_h', ticketId: 'tkt_h', status: 'running', startedAt: 1 })
+    const app = assemble({ ...deps, token: 'tok', tools: editor })
+    await app.start()
+    expect(deps.order.filter(entry => entry.startsWith('create:'))).toHaveLength(0)
   })
 
   it('retries pending triggers left over from an unavailable eval on start', async () => {
