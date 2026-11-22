@@ -10,9 +10,18 @@ describe('plugin README', () => {
   const readme = read('README.md')
 
   it('explains the plugin registration and the serving model', () => {
+    expect(readme).toContain('SETUP.md')
     expect(readme).toContain('git clone https://github.com/ZephyrBD/superagent-prototype-for-opencode.git')
     expect(readme).toContain('"plugins"')
     expect(readme).toContain('opencode serve')
+  })
+
+  it('links the setup playbook and it exists', () => {
+    expect(existsSync(resolve(ROOT, 'SETUP.md'))).toBe(true)
+    const setup = read('SETUP.md')
+    expect(setup).toContain('GITHUB_TOKEN')
+    expect(setup).toContain('allowedActors')
+    expect(setup).toContain('opencode serve')
   })
 
   it('names the minimum configuration', () => {
