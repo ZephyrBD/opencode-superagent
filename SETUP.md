@@ -1,6 +1,6 @@
 # SETUP.md — 安装剧本（lite 分支）
 
-> 本文件是给编码 Agent 照着执行的安装剧本。用户会说「带我安装 opencode-superagent-lite」，Agent 按下面的步骤逐项确认后执行，**一次只问一个具体问题**，全部信息齐了再动手。
+> 本文件是给编码 Agent 照着执行的安装剧本。用户会说「带我安装 opencode-superagent-lite」（完整提示词见本仓库 README：克隆仓库、切换到 lite 分支、阅读本文件），Agent 按下面的步骤逐项确认后执行，**一次只问一个具体问题**，全部信息齐了再动手。
 
 ## 你（Agent）需要收集的信息
 
