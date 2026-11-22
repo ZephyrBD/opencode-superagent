@@ -15,6 +15,11 @@ export const PolicySchema = z.object({
   /** Proactive work (nobody asked) starts in record mode: it is judged and noted, never executed. */
   proactive: z.enum(['off', 'record', 'act']).default('record'),
   github: GithubSourceConfigSchema,
+  feishu: z.object({
+    chats: z.array(z.object({ id: z.string().min(1), listen: z.enum(['mentions', 'all']) }).strict()).default([]),
+    pollSeconds: z.number().int().min(10).max(3600).default(30),
+    cliPath: z.string().default('lark-cli'),
+  }).strict().optional(),
 }).strict()
 export type Policy = z.infer<typeof PolicySchema>
 

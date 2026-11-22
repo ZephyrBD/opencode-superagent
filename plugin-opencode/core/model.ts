@@ -5,7 +5,7 @@ export type Actor = z.infer<typeof ActorSchema>
 
 export const TriggerSchema = z.object({
   id: z.string().min(1),
-  source: z.literal('github'),
+  source: z.enum(['github', 'feishu']),
   actor: ActorSchema,
   text: z.string(),
   url: z.string(),

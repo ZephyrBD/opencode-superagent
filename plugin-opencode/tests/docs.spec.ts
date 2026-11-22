@@ -20,6 +20,11 @@ describe('plugin README', () => {
     expect(readme).toContain('allowedActors')
   })
 
+  it('documents both sources', () => {
+    expect(readme).toContain('飞书')
+    expect(readme).toContain('lark-cli')
+  })
+
   it('states the operator responsibilities', () => {
     expect(readme).toContain('Start narrow')
     expect(readme).toContain('噪音')

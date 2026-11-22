@@ -8,6 +8,7 @@ import { Outbox } from './core/outbox.ts'
 import type { KV } from './core/kv.ts'
 import { ReportSchema, type Ticket } from './core/model.ts'
 import { GitHubSource } from './sources/github/index.ts'
+import { FeishuSource, type FeishuCli } from './sources/feishu/index.ts'
 import { startPanel } from './panel/http.ts'
 import type { Assignment } from './core/assignment.ts'
 
@@ -43,6 +44,8 @@ export interface AssembleDeps {
   panel?: { port?: number }
   /** The write side of the origin threads; PR outcome notices go out through it. */
   channel?: { reply(threadKey: string, text: string): Promise<void> }
+  /** Optional Feishu Source; polls alongside GitHub when provided. */
+  feishu?: { cli: FeishuCli }
   /** Policy overrides: repository and allowed actors are the operator's decision. */
   config?: { repository?: string; allowedActors?: string[]; policyVersion?: string }
 }
@@ -51,6 +54,8 @@ export interface AssembledApp {
   engine: Engine
   executor: Executor
   outbox: Outbox
+  /** Runs one poll across every enabled source. */
+  pollAll(): Promise<unknown[]>
   start(): Promise<void>
   cleanup(): Promise<void>
 }
@@ -142,10 +147,22 @@ export const assemble = (deps: AssembleDeps): AssembledApp => {
   let handle: unknown
   let timerSet = false
   const closePanel = { close: async () => {} }
-  return {
+  const feishuSource = deps.feishu
+    ? new FeishuSource({ config: { chats: [], pollSeconds: 30 }, cli: deps.feishu.cli, kv: deps.kv, intake: trigger => {
+        void engine.intake(trigger).catch(() => {})
+        return Promise.resolve('evaluated')
+      } })
+    : undefined
+  const app: AssembledApp = {
     engine,
     executor,
     outbox,
+    async pollAll() {
+      const results: Promise<unknown>[] = []
+      if (deps.poll) results.push(deps.poll())
+      if (feishuSource) results.push(feishuSource.pollOnce())
+      return Promise.all(results)
+    },
     async start() {
       // Recover stored work first: a reload or crash must replay it before anything new launches.
       if (deps.recover) await deps.recover()
@@ -169,8 +186,8 @@ export const assemble = (deps: AssembleDeps): AssembledApp => {
         const panel = await startPanel({ kv: deps.kv }, { port: deps.panel.port })
         closePanel.close = panel.close
       }
-      if (deps.poll) {
-        const tick = () => void deps.poll!().catch(() => {})
+      if (deps.poll || feishuSource) {
+        const tick = () => void app.pollAll().catch(() => {})
         const set = deps.setIntervalFn ?? ((fn: () => void, ms: number) => setInterval(fn, ms))
         handle = set(tick, 60_000)
         timerSet = true
@@ -184,6 +201,7 @@ export const assemble = (deps: AssembleDeps): AssembledApp => {
       await closePanel.close()
     },
   }
+  return app
 }
 
 // The OpenCode plugin shell. The domain above is plain code; this is the only OpenCode-specific part.

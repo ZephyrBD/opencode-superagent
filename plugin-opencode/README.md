@@ -46,6 +46,11 @@ opencode serve
 - **不要用它产出数量**：批量 PR、广播消息的代价大于价值。
 - **对它说的话负责**：读它以你名义发的内容，错了就在 prompt 里纠正。
 
+## Source
+
+- **GitHub**：Notifications 轮询 + open PR 跟随（分支名末段 = 工单 ID），PR 关闭/合并驱动工单收尾
+- **飞书（可选）**：通过 `lark-cli` 的 `pull/reply` 子命令轮询；配置 `feishu.chats`（每聊天 `mentions`/`all`）后启用；回复按 key 幂等，已删除会话的消息永久丢弃
+
 ## 词汇表
 
 Trigger/触发、Thread/线程、Eval/评估、Mandate/授权、Ticket/工单、Subscription/订阅——完整定义见 [根文档 001-domain](../docs/001-domain.md)。

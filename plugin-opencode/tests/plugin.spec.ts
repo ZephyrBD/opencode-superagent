@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { assemble } from '../index.ts'
 import type { ToolContext, ToolEditor } from '../index.ts'
+import type { FeishuCli } from '../sources/feishu/index.ts'
 import { MemoryKV } from '../core/kv.ts'
 import type { SessionPort, WorktreePort } from '../core/executor.ts'
 
@@ -106,6 +107,23 @@ describe('assemble', () => {
     await deps.kv.set('ticket/tkt_1', ticket)
     await app.outbox.enqueue('notice', { ticketId: 'tkt_1', text: 'pull request #42 merged; work complete.' })
     expect(replies).toEqual([{ threadKey: 'github:a/b:1', text: 'pull request #42 merged; work complete.' }])
+  })
+
+  it('polls every enabled source on the interval', async () => {
+    const deps = baseDeps()
+    const { editor } = fakeToolRegistry()
+      const pulled: number[] = []
+    const cli: FeishuCli = {
+      pull: async after => {
+        pulled.push(after)
+        return { me: 'ou_bot', items: [], next: after }
+      },
+      reply: async () => {},
+      thread: async () => ({ items: [] }),
+    }
+    const app = assemble({ ...deps, token: 'tok', tools: editor, feishu: { cli } })
+    await app.pollAll()
+    expect(pulled).toHaveLength(1)
   })
 
   it('validates report tool input and refuses a report from a foreign session', async () => {
