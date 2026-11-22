@@ -27,12 +27,12 @@ pnpm --version || npm --version   # 需要一个包管理器
 ### 1. 克隆仓库并装依赖
 
 ```bash
-git clone https://github.com/ZephyrBD/superagent-prototype-for-opencode.git <安装目录>
+git clone https://github.com/ZephyrBD/opencode-superagent.git <安装目录>
 cd <安装目录>
 pnpm install
 ```
 
-推荐安装目录：`C:\Users\<用户>\.agents\superagent-prototype-for-opencode`（全局）或项目旁的 `tools/` 目录（单项目）。`<安装目录>` 由第 5 条回答决定。
+推荐安装目录：`C:\Users\<用户>\.agents\opencode-superagent`（全局）或项目旁的 `tools/` 目录（单项目）。`<安装目录>` 由第 5 条回答决定。
 
 ### 2. 注册插件
 

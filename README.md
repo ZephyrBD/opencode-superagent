@@ -1,6 +1,6 @@
 # opencode-superagent
 
-一个 OpenCode 插件：为你的 GitHub 仓库配一个常驻的编码智能体团队伙伴。它改编自 DeepSeek Harness 的 [dsh-superagent 原型](https://github.com/ZephyrBD/superagent-prototype-for-opencode/blob/vanilla/README.md)，保留其领域模型与哲学：
+一个 OpenCode 插件：为你的 GitHub 仓库配一个常驻的编码智能体团队伙伴。它改编自 DeepSeek Harness 的 [dsh-superagent 原型](https://github.com/ZephyrBD/opencode-superagent/blob/vanilla/README.md)，保留其领域模型与哲学：
 
 > **尽可能少占用人的注意力，尽可能多地给出价值。**
 
@@ -29,8 +29,8 @@
 
 ```bash
 # 1. 克隆仓库并安装依赖
-git clone https://github.com/ZephyrBD/superagent-prototype-for-opencode.git
-cd superagent-prototype-for-opencode
+git clone https://github.com/ZephyrBD/opencode-superagent.git
+cd opencode-superagent
 pnpm install
 
 # 2. 常驻运行（插件挂在 serve 进程里）
@@ -43,7 +43,7 @@ opencode serve
 { "plugins": ["<上一步克隆出的仓库路径>"] }
 ```
 
-> 备注：`opencode plugin add github:ZephyrBD/superagent-prototype-for-opencode#main` 在大多数机器上可用，但 npm 全局安装的编译版 opencode 存在一个已知 bug（git 依赖的 prepare 阶段错误地用 opencode 自身解释内嵌 npm），会报 `git dep preparation failed`。遇到该报错时请使用上面的克隆方式。发布 npm 包后此备注将失效。
+> 备注：`opencode plugin add github:ZephyrBD/opencode-superagent#main` 在大多数机器上可用，但 npm 全局安装的编译版 opencode 存在一个已知 bug（git 依赖的 prepare 阶段错误地用 opencode 自身解释内嵌 npm），会报 `git dep preparation failed`。遇到该报错时请使用上面的克隆方式。发布 npm 包后此备注将失效。
 
 ## 最低配置
 
@@ -69,7 +69,7 @@ opencode serve
 
 ## 词汇表
 
-Trigger/触发、Thread/线程、Eval/评估、Mandate/授权、Ticket/工单、Subscription/订阅——完整定义见 [原型文档 001-domain](https://github.com/ZephyrBD/superagent-prototype-for-opencode/blob/vanilla/docs/001-domain.md)。
+Trigger/触发、Thread/线程、Eval/评估、Mandate/授权、Ticket/工单、Subscription/订阅——完整定义见 [原型文档 001-domain](https://github.com/ZephyrBD/opencode-superagent/blob/vanilla/docs/001-domain.md)。
 
 ## 行为规范文件
 
