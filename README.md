@@ -55,7 +55,6 @@ opencode serve
 { "plugins": ["<上一步克隆出的仓库路径>"] }
 ```
 
-> 备注：`opencode plugin add github:ZephyrBD/opencode-superagent#main` 在大多数机器上可用，但 npm 全局安装的编译版 opencode 存在一个已知 bug（git 依赖的 prepare 阶段错误地用 opencode 自身解释内嵌 npm），会报 `git dep preparation failed`。遇到该报错时请使用上面的克隆方式。发布 npm 包后此备注将失效。
 
 ## 最低配置
 
