@@ -8,9 +8,10 @@
 
 - `main` —— 完整插件（GitHub Notifications + 飞书 Source、面板、策略版本化）
 - `lite` —— 本分支：同一领域模型的最小子集，session 即 Source
-- `prototype` / `vanilla` —— DSH 原型的历史形态
+- `prototype` —— 过渡形态存档：DSH 原型在根 + `plugin-opencode/` 子目录
+- `vanilla` —— 原始 dsh-superagent 研究原型（DeepSeek Harness bundle），只读
 
-两个插件分支是同一仓库的两种形态，靠 rebase 维持，不互相 merge。
+两个插件分支是同一仓库的两种形态，靠 rebase 维持，不互相 merge；存档分支只读。
 
 ## 保留了什么
 
