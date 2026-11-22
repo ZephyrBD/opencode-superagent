@@ -23,7 +23,7 @@ export interface EngineDeps {
   policy: Policy
   assessor: Assessor
   clock: () => number
-  notify(event: { type: 'fanout'; ticketId: string; trigger: Trigger } | { type: 'decision'; decision: Decision; threadKey: string }): void
+  notify(event: { type: 'fanout'; ticketId: string; trigger: Trigger } | { type: 'decision'; decision: Decision; threadKey: string } | { type: 'notice'; ticketId: string; text: string }): void
 }
 
 const threadKeyOf = (key: string) => `thread/${key}`
@@ -168,6 +168,48 @@ export class Engine {
       await this.kv.remove(`disposition/${trigger.id}`)
       await this.intake(trigger)
     }
+  }
+
+  /** The Ticket follows a pull request once discovered; its thread subscribes for review comments. */
+  async followPr(ticketId: string, number: number): Promise<void> {
+    const ticket = await this.kv.get<Ticket>(ticketKeyOf(ticketId))
+    if (!ticket) throw new Error(`unknown ticket ${ticketId}`)
+    const threadKey = `github:${this.policy.github.repository}:pr:${number}`
+    if (!ticket.subscriptions.includes(threadKey)) ticket.subscriptions.push(threadKey)
+    await this.kv.set(ticketKeyOf(ticketId), ticket)
+    const followed = await this.followedPrs(ticketId)
+    if (!followed.some(pr => pr.number === number)) followed.push({ number, open: true })
+    await this.kv.set(`pr/${ticketId}`, followed)
+  }
+
+  async followedPrs(ticketId: string): Promise<Array<{ number: number; open: boolean }>> {
+    return (await this.kv.get<Array<{ number: number; open: boolean }>>(`pr/${ticketId}`)) ?? []
+  }
+
+  /** Reports recorded outside the worker: pull-request events and CI results land here. */
+  async reportExternal(ticketId: string, report: { kind: 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'; text: string; at: number }): Promise<void> {
+    const ticket = await this.kv.get<Ticket>(ticketKeyOf(ticketId))
+    if (!ticket) throw new Error(`unknown ticket ${ticketId}`)
+    ticket.reports.push(report)
+    await this.kv.set(ticketKeyOf(ticketId), ticket)
+  }
+
+  /**
+   * A followed pull request closed. The ticket is done when none of its pull requests remain
+   * open and the last report is ready; the outcome follows the close.
+   */
+  async prClosed(ticketId: string, number: number, merged: boolean): Promise<void> {
+    const followed = await this.followedPrs(ticketId)
+    const entry = followed.find(pr => pr.number === number)
+    if (entry) entry.open = false
+    await this.kv.set(`pr/${ticketId}`, followed)
+    const ticket = await this.kv.get<Ticket>(ticketKeyOf(ticketId))
+    if (!ticket || ticket.status !== 'open') return
+    if (followed.some(pr => pr.open)) return
+    const last = ticket.reports.at(-1)
+    if (last?.kind !== 'ready') return
+    await this.endTicket(ticketId, merged ? 'completed' : 'dropped')
+    this.notify({ type: 'notice', ticketId, text: merged ? `pull request #${number} merged; work complete.` : `pull request #${number} closed without merge; work dropped.` })
   }
 
   private async assess(thread: ThreadState, tickets: readonly Ticket[]): Promise<Decision & { at: number }> {

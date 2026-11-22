@@ -92,6 +92,22 @@ describe('assemble', () => {
     expect(deps.sessions.prompts.at(-1)?.text).toBe('use plan b')
   })
 
+  it('sends PR outcome notices to the origin channel through the outbox', async () => {
+    const deps = baseDeps()
+    const { editor } = fakeToolRegistry()
+    const replies: Array<{ threadKey: string; text: string }> = []
+    const app = assemble({
+      ...deps, token: 'tok', tools: editor,
+      channel: { reply: async (threadKey, text) => { replies.push({ threadKey, text }) } },
+    })
+    await app.outbox.enqueue('notice', { ticketId: 'tkt_1', text: 'pull request #42 merged; work complete.' })
+    expect(replies).toHaveLength(0) // unknown ticket: nothing to send
+    const ticket = { id: 'tkt_1', mandateId: 'man_1', status: 'open', subscriptions: ['github:a/b:1'], reports: [], assignmentIds: [] }
+    await deps.kv.set('ticket/tkt_1', ticket)
+    await app.outbox.enqueue('notice', { ticketId: 'tkt_1', text: 'pull request #42 merged; work complete.' })
+    expect(replies).toEqual([{ threadKey: 'github:a/b:1', text: 'pull request #42 merged; work complete.' }])
+  })
+
   it('validates report tool input and refuses a report from a foreign session', async () => {
     const deps = baseDeps()
     const { editor, registered } = fakeToolRegistry()

@@ -41,6 +41,8 @@ export interface AssembleDeps {
   setIntervalFn?: (fn: () => void, ms: number) => unknown
   clearIntervalFn?: (handle: unknown) => void
   panel?: { port?: number }
+  /** The write side of the origin threads; PR outcome notices go out through it. */
+  channel?: { reply(threadKey: string, text: string): Promise<void> }
   /** Policy overrides: repository and allowed actors are the operator's decision. */
   config?: { repository?: string; allowedActors?: string[]; policyVersion?: string }
 }
@@ -78,6 +80,11 @@ export const assemble = (deps: AssembleDeps): AssembledApp => {
         if (ticket.status !== 'open') return
         await executor.deliver(ticketId, inputs.join('\n'))
       }
+      if (kind === 'notice' && deps.channel) {
+        // The notice goes to the ticket's origin thread: the first subscription.
+        const origin = ticket.subscriptions[0]
+        if (origin && !origin.includes(':pr:')) await deps.channel.reply(origin, (payload as { text: string }).text)
+      }
     },
   })
 
@@ -103,6 +110,9 @@ export const assemble = (deps: AssembleDeps): AssembledApp => {
     notify: event => {
       if (event.type === 'fanout') {
         void outbox.enqueue('deliver', { ticketId: event.ticketId, inputs: [event.trigger.text] }).catch(() => {})
+      }
+      if (event.type === 'notice') {
+        void outbox.enqueue('notice', { ticketId: event.ticketId, text: event.text }).catch(() => {})
       }
     },
   })
@@ -251,6 +261,16 @@ export default Plugin.define({
       generate,
       config: { repository, allowedActors },
       panel: { port: config.panelPort },
+      channel: {
+        reply: async (threadKey, text) => {
+          const [, repo, , number] = threadKey.split(':')
+          await fetch(`https://api.github.com/repos/${repo}/issues/${number}/comments`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ body: text }),
+          })
+        },
+      },
       poll: () => {
         const source = new GitHubSource({
           config: { repository, allowedActors, pollSeconds: config.pollSeconds ?? 60, agentLogin },

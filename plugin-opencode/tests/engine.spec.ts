@@ -188,4 +188,45 @@ describe('engine ticket lifecycle', () => {
     await engine.stop(ticket.id)
     expect((await engine.tickets())[0]).toMatchObject({ status: 'ended', outcome: 'stopped' })
   })
+
+  it('follows a pull request and ends the ticket only when it closes after a ready report', async () => {
+    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
+    const { engine, events } = setup(assessor)
+    await engine.intake(trigger())
+    const ticket = (await engine.tickets())[0]!
+    await engine.followPr(ticket.id, 42)
+    const followed = await engine.followedPrs(ticket.id)
+    expect(followed).toEqual([{ number: 42, open: true }])
+    expect(ticket.subscriptions).toContain('github:a/b:pr:42')
+
+    // PR still open: a ready report waits for review instead of ending.
+    await engine.reportExternal(ticket.id, { kind: 'ready', text: 'PR open', at: 2 })
+    expect((await engine.tickets())[0]!.status).toBe('open')
+
+    await engine.prClosed(ticket.id, 42, true)
+    expect((await engine.tickets())[0]).toMatchObject({ status: 'ended', outcome: 'completed' })
+    expect(events).toContainEqual(expect.objectContaining({ type: 'notice', ticketId: ticket.id }))
+  })
+
+  it('ends a ticket whose followed PR closed without merge as dropped', async () => {
+    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
+    const { engine } = setup(assessor)
+    await engine.intake(trigger())
+    const ticket = (await engine.tickets())[0]!
+    await engine.followPr(ticket.id, 7)
+    await engine.reportExternal(ticket.id, { kind: 'ready', text: 'ready', at: 2 })
+    await engine.prClosed(ticket.id, 7, false)
+    expect((await engine.tickets())[0]).toMatchObject({ status: 'ended', outcome: 'dropped' })
+  })
+
+  it('keeps a ticket open while another followed PR stays open', async () => {
+    const assessor = fakeAssessor([() => ({ kind: 'accept', scope: 's' })])
+    const { engine } = setup(assessor)
+    await engine.intake(trigger())
+    const ticket = (await engine.tickets())[0]!
+    await engine.followPr(ticket.id, 1)
+    await engine.followPr(ticket.id, 2)
+    await engine.prClosed(ticket.id, 1, true)
+    expect((await engine.tickets())[0]!.status).toBe('open')
+  })
 })

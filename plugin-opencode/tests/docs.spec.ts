@@ -43,7 +43,12 @@ describe('plugin README', () => {
     const orchestrator = read('prompts/orchestrator.md')
     expect(orchestrator).toContain('hand it back')
     expect(orchestrator).toContain('When in doubt between accept and ignore, ignore')
+  })
+
+  it('keeps the worker prompt honest about merging and reporting', () => {
     const worker = read('prompts/worker.md')
     expect(worker).toContain('Report honestly')
+    expect(worker).toContain('Never enable auto-merge as the agent account')
+    expect(worker).toContain('withdraw auto-merge')
   })
 })

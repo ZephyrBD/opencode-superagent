@@ -222,6 +222,7 @@ export class Executor {
       `Ticket ${ticket.id}. Work directory: ${ticket.directory}.`,
       `You are the worker for this ticket. Report progress with the superagent_report_ticket tool, using one of: progress, waiting, ready, blocked, failed, dropped.`,
       `Blocked means you need a person's decision: report blocked and stop.`,
+      `Merging: Never enable auto-merge as the agent account; only for this ticket's pull request, when ready, approvals cover the head commit, and the diff is under 200 lines; withdraw auto-merge before pushing another revision.`,
     ]
     if (recovery) {
       lines.push(

@@ -19,6 +19,8 @@ export interface GitHubSourceDeps {
   fetchJSON(url: string, init?: RequestInit): Promise<{ status: number; json(): Promise<unknown> }>
   fetchThread(apiUrl: string): Promise<ThreadInfo>
   intake(trigger: Trigger): Promise<string>
+  follow?(ticketId: string, number: number, head: string): Promise<void>
+  prClosed?(ticketId: string, number: number, merged: boolean): Promise<void>
 }
 
 interface ApiListResponse {
@@ -36,6 +38,8 @@ export class GitHubSource {
   private readonly fetchJSON: GitHubSourceDeps['fetchJSON']
   private readonly fetchThread: GitHubSourceDeps['fetchThread']
   private readonly intake: GitHubSourceDeps['intake']
+  private readonly follow?: GitHubSourceDeps['follow']
+  private readonly prClosed?: GitHubSourceDeps['prClosed']
   private failedPolls = 0
   private lastError?: { message: string }
 
@@ -46,6 +50,8 @@ export class GitHubSource {
     this.fetchJSON = deps.fetchJSON
     this.fetchThread = deps.fetchThread
     this.intake = deps.intake
+    this.follow = deps.follow
+    this.prClosed = deps.prClosed
   }
 
   /** Thread-level read errors; a failed thread is retried on the next poll, never dropped. */
@@ -93,6 +99,7 @@ export class GitHubSource {
         if (subjectUrl) await this.readThread({ id, subject: { url: subjectUrl } })
       }
       if (modified) await this.kv.set('since', modified)
+      await this.pollPulls()
       this.failedPolls = 0
       return 'ok'
     } catch (error) {
@@ -103,6 +110,36 @@ export class GitHubSource {
   }
 
   /** Reads one thread; returns whether it succeeded, so the poll can tell fresh failures from old ones. */
+  /**
+   * Follows every open pull request whose branch names a ticket (tkt_*), and reports
+   * followed PRs that left the open list as closed. The registry lives in KV, so a
+   * restart keeps the followings.
+   */
+  private async pollPulls(): Promise<void> {
+    if (!this.follow || !this.prClosed) return
+    const response = await this.fetchJSON(`https://api.github.com/repos/${this.config.repository}/pulls?state=open`, { headers: this.headers({}) })
+    if (response.status >= 400) return
+    const openPulls = await response.json() as Array<{ number: number; head: { ref: string } }>
+    const tracked = await this.kv.scan('followed/')
+    for (const pull of openPulls) {
+      const ticketId = pull.head.ref.split('/').at(-1)!
+      if (!/^tkt_/.test(ticketId)) continue
+      const key = `followed/${ticketId}_${pull.number}`
+      if (await this.kv.get(key)) continue
+      await this.kv.set(key, { ticketId, number: pull.number, head: pull.head.ref, open: true })
+      await this.follow(ticketId, pull.number, pull.head.ref)
+    }
+    for (const row of tracked) {
+      const record = row.value as { ticketId: string; number: number; open: boolean }
+      if (!record.open) continue
+      if (openPulls.some(pull => pull.number === record.number)) continue
+      await this.kv.set(row.key, { ...record, open: false })
+      const detail = await this.fetchJSON(`https://api.github.com/repos/${this.config.repository}/pulls/${record.number}`, { headers: this.headers({}) })
+      const merged = detail.status < 400 && ((await detail.json()) as { merged?: boolean }).merged === true
+      await this.prClosed(record.ticketId, record.number, merged)
+    }
+  }
+
   private async readThread(item: { id: number; subject: { url: string } }): Promise<boolean> {
     const seenKey = `seen/${item.id}`
     if (await this.kv.get(seenKey)) return true
@@ -123,6 +160,7 @@ export class GitHubSource {
       return true
     }
     const apiRepo = await this.repoName(item.subject.url)
+    const isPull = item.subject.url.includes('/pulls/')
     const trigger: Trigger = {
       id: `trg_github_${latest.id}`,
       source: 'github',
@@ -130,7 +168,7 @@ export class GitHubSource {
       text: latest.body,
       url: latest.html_url,
       at: Date.parse(latest.created_at),
-      threadKey: `github:${apiRepo}:${thread.number}`,
+      threadKey: isPull ? `github:${apiRepo}:pr:${thread.number}` : `github:${apiRepo}:${thread.number}`,
     }
     await this.intake(trigger)
     await this.kv.set(seenKey, true)

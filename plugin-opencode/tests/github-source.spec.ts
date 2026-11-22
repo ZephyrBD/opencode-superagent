@@ -154,6 +154,23 @@ describe('github source', () => {
     expect(await source.threadErrors()).toHaveLength(1)
   })
 
+  it('maps a pull-request notification onto its pr thread key', async () => {
+    const { fetchJSON } = fakeFetch([
+      { status: 200, body: [{ id: 9, subject: { url: 'https://api.github.com/repos/a/b/pulls/42' } }] },
+    ])
+    const received: Trigger[] = []
+    const source = new GitHubSource({
+      config, token: 'tok', kv: MemoryKV(), fetchJSON,
+      fetchThread: async () => ({ number: 42, comments: [comment()], state: 'open' }),
+      intake: async t => {
+        received.push(t)
+        return 'evaluated'
+      },
+    })
+    await source.pollOnce()
+    expect(received[0]?.threadKey).toBe('github:a/b:pr:42')
+  })
+
   it('reports an error after three failed polls in a row and clears on success', async () => {
     const failing = fakeFetch([{ status: 500, body: { message: 'boom' } }, { status: 500, body: {} }, { status: 500, body: {} }])
     const source = new GitHubSource({
@@ -174,6 +191,43 @@ describe('github source', () => {
     })
     await healthy.pollOnce()
     expect(healthy.error()).toBeUndefined()
+  })
+  it('follows ticket PRs when they appear and reports them closed when they leave the open list', async () => {
+    const followed: Array<{ ticketId: string; number: number }> = []
+    const closed: Array<{ ticketId: string; number: number; merged: boolean }> = []
+    const kv = MemoryKV()
+    const first = fakeFetch([
+      { status: 200, body: [] },
+      { status: 200, body: [] },
+      { status: 200, body: [] },
+      { status: 200, body: [{ number: 42, head: { ref: 'work/tkt_abc' } }] },
+    ])
+    const source = new GitHubSource({
+      config, token: 'tok', kv, fetchJSON: first.fetchJSON,
+      fetchThread: async () => ({ number: 1, comments: [], state: 'open' }),
+      intake: async () => 'evaluated',
+      follow: async (ticketId, number, _head) => { followed.push({ ticketId, number }) },
+      prClosed: async (ticketId, number, merged) => { closed.push({ ticketId, number, merged }) },
+    })
+    await source.pollOnce()
+    expect(followed).toHaveLength(0)
+    await source.pollOnce()
+    expect(followed).toEqual([{ ticketId: 'tkt_abc', number: 42 }])
+
+    const second = fakeFetch([
+      { status: 200, body: [] },
+      { status: 200, body: [] },
+      { status: 200, body: { merged: true } },
+    ])
+    const tracker = new GitHubSource({
+      config, token: 'tok', kv, fetchJSON: second.fetchJSON,
+      fetchThread: async () => ({ number: 1, comments: [], state: 'open' }),
+      intake: async () => 'evaluated',
+      follow: async (ticketId, number, _head) => { followed.push({ ticketId, number }) },
+      prClosed: async (ticketId, number, merged) => { closed.push({ ticketId, number, merged }) },
+    })
+    await tracker.pollOnce()
+    expect(closed).toEqual([{ ticketId: 'tkt_abc', number: 42, merged: true }])
   })
 })
 

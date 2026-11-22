@@ -47,6 +47,14 @@ const ticket = (over: Partial<Ticket> = {}): Ticket => ({
 })
 
 describe('executor', () => {
+  it('briefs the worker with the merge governance rules', async () => {
+    const sessions = fakeSessions()
+    const executor = new Executor({ sessions, worktrees: fakeWorktrees(), kv: MemoryKV(), limit: 2 })
+    const t = ticket()
+    await executor.dispatch(t, ['x'])
+    expect(sessions.prompts[0]!.text).toContain('Never enable auto-merge')
+  })
+
   it('re-delivers unread inputs on a new assignment and stops after a report confirms them', async () => {
     const kv = MemoryKV()
     const sessions = fakeSessions()
