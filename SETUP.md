@@ -1,6 +1,6 @@
 # SETUP.md — 安装剧本
 
-> 本文件是给编码 Agent 照着执行的安装剧本。用户会说「带我安装 opencode-superagent」，Agent 按下面的步骤逐项确认后执行，**一次只问一个具体问题**，全部信息齐了再动手。
+> 本文件是给编码 Agent 照着执行的安装剧本。用户会说「按 https://github.com/ZephyrBD/opencode-superagent 的 SETUP.md，带我安装 opencode-superagent」，Agent 按下面的步骤逐项确认后执行，**一次只问一个具体问题**，全部信息齐了再动手。
 
 ## 你（Agent）需要收集的信息
 

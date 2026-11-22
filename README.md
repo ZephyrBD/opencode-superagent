@@ -1,23 +1,22 @@
 # opencode-superagent
 
-一个 OpenCode 插件：为你的 GitHub 仓库配一个常驻的编码智能体团队伙伴。它改编自 DeepSeek Harness 的 [dsh-superagent 原型](https://github.com/ZephyrBD/opencode-superagent/blob/vanilla/README.md)，保留其领域模型与哲学：
+一个仓库，三种形态，同一个思想：为编码智能体装上"接单—授权—执行—汇报"的骨架，改编自 DeepSeek Harness 的 dsh-superagent 原型。
 
 > **尽可能少占用人的注意力，尽可能多地给出价值。**
 
 它只在被请求时、或团队的书面规则允许时行动；只在人必须行动、或能使用结果时说话。
 
-## 分支总览
-
-本仓库用分支承载同一思想的三种形态，各分支的 README 只讲自己的事：
+## 三种形态
 
 | 分支 | 是什么 | 适合谁 |
 | --- | --- | --- |
-| [`main`](https://github.com/ZephyrBD/opencode-superagent/tree/main)（本分支） | 完整插件：GitHub Notifications + 飞书 Source、策略 gate + 模型研判、面板 | 想给整个 GitHub 仓库配常驻智能体的团队 |
-| [`lite`](https://github.com/ZephyrBD/opencode-superagent/tree/lite) | 极简插件：会话本身即唯一 Source，`/work` 开单，无外部依赖 | 想先在本地会话里体验核心思想的个人（对该 Agent 说「克隆 https://github.com/ZephyrBD/opencode-superagent 并切换到 lite 分支，阅读其中的 SETUP.md，带我安装 opencode-superagent-lite」） |
-| [`prototype`](https://github.com/ZephyrBD/opencode-superagent/tree/prototype) | 过渡形态的存档：DSH 原型在根 + `plugin-opencode/` 子目录 | 考古：插件从原型剥离时的样子 |
-| [`vanilla`](https://github.com/ZephyrBD/opencode-superagent/tree/vanilla) | 原始 dsh-superagent 研究原型（DeepSeek Harness bundle） | 研究领域模型与架构文档 |
+| [`main`](https://github.com/ZephyrBD/opencode-superagent/tree/main)（本分支） | **完整插件**：GitHub Notifications + 飞书 Source、策略 gate + 模型研判、面板 | 想给整个 GitHub 仓库配常驻智能体的团队 |
+| [`lite`](https://github.com/ZephyrBD/opencode-superagent/tree/lite) | **极简插件**：会话本身即唯一 Source，`/work` 开单，无外部依赖 | 想先在本地会话里体验核心思想的个人 |
+| [`vanilla`](https://github.com/ZephyrBD/opencode-superagent/tree/vanilla) | **研究原型存档**：原始 dsh-superagent（DeepSeek Harness bundle），只读 | 研究领域模型与架构文档（[001-domain](https://github.com/ZephyrBD/opencode-superagent/blob/vanilla/docs/001-domain.md) 起） |
 
-完整插件与 lite 插件是同仓库的两种形态，靠 rebase 维持，不互相 merge；`prototype` 与 `vanilla` 是只读存档。
+完整插件与 lite 插件是同仓库的两种形态，靠 rebase 维持，不互相 merge；存档分支只读。**装哪个取决于你的插件路径指向哪个分支的 checkout**，OpenCode 里切换 agent 不会改变它。
+
+本分支 README 只讲完整插件；lite 的安装与使用见 [lite 分支 README](https://github.com/ZephyrBD/opencode-superagent/blob/lite/README.md)。
 
 ## 它做什么
 
@@ -33,7 +32,7 @@
 对你的编码 Agent 说：
 
 ```text
-克隆 https://github.com/ZephyrBD/opencode-superagent 并阅读其中的 SETUP.md，带我安装 opencode-superagent。
+按 https://github.com/ZephyrBD/opencode-superagent 的 SETUP.md，带我安装 opencode-superagent。
 ```
 
 也可以手动安装，见 [SETUP.md](SETUP.md)。
